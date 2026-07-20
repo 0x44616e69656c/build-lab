@@ -1,0 +1,11 @@
+/junk
+/logs
+/artifacts
+.gitignore-publish
+journal.md
+gotchas.md
+updates.md
+changes.md
+AD_Deployment_Consolidated_Plan.md
+todo.md
+plan.md
