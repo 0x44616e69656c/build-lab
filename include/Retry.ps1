@@ -37,9 +37,9 @@
     $null = Invoke-CommandWithRetry -ScriptBlock { New-ADOrganizationalUnit -Name $localOUName -Path $domainDN }.GetNewClosure() `
         -OperationName "New-ADOU $localOUName" -ThrowOnFailure
 .NOTES
-    Version:          1.0.0
+    Version:          1.0.1
     Author:           Daniel Owen
-    Release Date:     2026-06-11
+    Release Date:     2026-10-26
     Requirements:     Windows PowerShell 5.1. Soft dependency on Logging.ps1 (Write-Log
                       auto-detected via Get-Command if -LogAction is not supplied; see
                       DESCRIPTION).
@@ -62,7 +62,7 @@ function Invoke-CommandWithRetry {
 
     # Local helper scriptblock: -LogAction wins if supplied; else auto-detect Write-Log
     # (Logging.ps1) in the session; else Write-Warning. Takes its inputs as parameters
-    # only, so it carries no dependency on outer-scope variables (rule 8).
+    # only, so it carries no dependency on outer-scope variables.
     $writeRetryLog = {
         param ([string]$LogMessage, [string]$LogLevel, [scriptblock]$LogActionParam)
         if ($LogActionParam) {

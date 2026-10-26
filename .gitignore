@@ -1,9 +1,10 @@
 /junk
 /logs
 /artifacts
+/reviews
+/tests
 .gitignore-publish
 journal.md
-gotchas.md
 updates.md
 changes.md
 AD_Deployment_Consolidated_Plan.md

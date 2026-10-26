@@ -19,9 +19,9 @@
     Write-AppEvent -Enabled $enableEventLogging -SourceName $sourceName `
         -EntryType Information -EventId 1000 -Message 'Get-AdminAudit started.'
 .NOTES
-    Version:          1.0.0
+    Version:          1.0.1
     Author:           Daniel Owen
-    Release Date:     2026-06-11
+    Release Date:     2026-10-26
     Requirements:     Windows PowerShell 5.1. Dot-source Sanitization.ps1 first (hard
                       dependency: Write-AppEvent calls ConvertTo-SafeLogValue).
                       WARNING: Write-EventLog is deprecated in PowerShell 7+. This library
@@ -38,10 +38,10 @@
 
 function Initialize-EventLogSource {
     # Ensures the Windows event-log source is registered so the consuming script can write
-    # to the Application log for SIEM ingestion (rule 25). Returns the effective source name:
+    # to the Application log for SIEM ingestion. Returns the effective source name:
     # the requested source if it exists or can be registered, otherwise the built-in
     # 'Application' source. New-EventLog source registration requires LOCAL ADMINISTRATOR
-    # rights (rule 26); a non-admin run falls back to 'Application' instead of failing.
+    # rights; a non-admin run falls back to 'Application' instead of failing.
     param (
         [Parameter(Mandatory)]
         [string]$SourceName,
@@ -66,9 +66,9 @@ function Initialize-EventLogSource {
 
 function Write-AppEvent {
     # Writes a single Windows event-log entry, gated by the caller's -Enabled flag.
-    # WARNING (rule 26): Write-EventLog is deprecated in PowerShell 7+. This targets Windows
+    # WARNING: Write-EventLog is deprecated in PowerShell 7+. This targets Windows
     # PowerShell 5.1; for a PS7 target, replace with New-WinEvent against a registered manifest.
-    # A write failure never aborts the caller - it degrades to a warning (rule 66, no silent swallow).
+    # A write failure never aborts the caller - it degrades to a warning, so it is never swallowed silently.
     param (
         [bool]$Enabled = $true,
         [Parameter(Mandatory)]
