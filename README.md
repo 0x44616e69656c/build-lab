@@ -406,6 +406,10 @@ This is a lab tool and it makes trades a production tool has no business making.
 
 **The build says promotion succeeded but the domain is empty.** -- Working as designed. You still need to log into the guest as Administrator to run directory population. See [Known Limitations](#known-limitations).
 
+## AI disclosure
+
+I used AI to help write some of the code. The design and architecture are all mine, including any questionable choices, and it was built up over many reviews and live runs, not generated as one shot slop.
+
 ## Contact
 
 - Mastodon: [@daniel@infosec.exchange](https://infosec.exchange/@daniel)
