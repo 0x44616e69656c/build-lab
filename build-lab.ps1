@@ -13,6 +13,25 @@
          in-guest).
       3. Runs New-ADForestDeployment.ps1 -CreateScheduledTask inside the guest.
 
+    Before any of that, in every mode, new-AdDomain is copied once into a per-run staging
+    folder on the host, with the build profile in place (see -ProfilePath), and the
+    staged copy is read and checked: the domain identity, the build profile and the
+    service account SPN placeholders. The guest gets exactly the files checked there. A
+    problem in them stops the run before any VM is built or changed.
+
+    Which build profile a run uses:
+      - -ProfilePath given: that file. If the source new-AdDomain also holds a different
+        include\build-profile.psd1, a WARN says it was replaced.
+      - -ProfilePath not given, and the source holds include\build-profile.psd1: that
+        file, with a WARN naming its path and SHA-256, because a file nobody named on the
+        command line then decides which forest is built.
+      - Neither: no build profile. The global-config.ps1 values apply.
+    The log names the profile's path and the SHA-256 of the copy the guest gets.
+
+    In a full build, when the effective PrimarySubnet is an explicit subnet rather than
+    Auto, the DC's -StaticIpAddress is checked against it early. A miss is a WARN. The
+    guest then uses Auto, and its "Requested subnet" test row fails.
+
     New-ADForestDeployment.ps1 is launched fire-and-forget (vmrun runProgramInGuest
     -noWait), so its exit status is never seen. On success it calls Restart-Computer
     -Force, and a blocking vmrun call held open across that reboot can hang
@@ -52,7 +71,7 @@
     -MemberServerCount (default 0) adds member servers once the DC promotion is verified
     (above). Members are built one at a time with the same New-VMwareWorkstationVM.ps1,
     are NOT promoted, and are joined to the domain named in new-AdDomain's
-    global-config.ps1:
+    global-config.ps1, or in the build profile when the run uses one:
       - Names are SRVR-NN (VM name and computer name are the same), using the lowest free
         numbers, gaps first. A number is taken if its folder exists under -VmStoragePath,
         if it is the DC's -VmName or -ComputerName, or (with -AddMemberServers) if AD
@@ -77,7 +96,8 @@
     -AddMemberServers builds and joins members against an EXISTING DC without touching
     it: no payload copy, no deployment relaunch. It checks that the DC answers guest
     operations, that ntds.dit is present, and that the DC's own domain role, domain,
-    address and prefix length match global-config.ps1 and the values passed to this run.
+    address and prefix length match the effective configuration (global-config.ps1, with
+    the build profile over it) and the values passed to this run.
     The gateway is checked only when -DefaultGateway is given; without it, the gateway is
     not checked and members get none. These checks run before the member plan, so a wrong
     -StaticIpAddress is reported as such. -IsoPath, the DC's -StaticIpAddress and
@@ -86,9 +106,11 @@
     -MoveMemberServers is the later OU=Servers step mentioned above, run on its own after
     an Administrator has logged into the DC and directory population has finished.
     Against the existing DC it moves every SRVR-NN computer object from the domain's
-    default computers container to OU=Servers (both read from the DC and
-    global-config.ps1), then re-queries to confirm none are left behind. It first checks
-    that the VM is a DC in global-config.ps1's domain. It fails with a clear message if
+    default computers container to OU=Servers (both read from the DC and the effective
+    configuration), then re-queries to confirm none are left behind. It first checks
+    that the VM is a DC in the configured domain. -AddMemberServers and -MoveMemberServers
+    need the build profile the DC was built with, chosen by the same rule as a build, or
+    the domain check refuses the DC. It fails with a clear message if
     OU=Servers does not exist yet, and moves nothing if more objects match than
     $maxMemberServerCount. Re-running it is harmless: objects already in OU=Servers are
     reported and left alone.
@@ -133,7 +155,13 @@
 .PARAMETER VmBuilderScriptPath
     Path to New-VMwareWorkstationVM.ps1. Default: the sibling project folder.
 .PARAMETER AdDomainSourcePath
-    Path to the new-AdDomain project. Default: the sibling project folder.
+    Path to the new-AdDomain project. Default: the sibling project folder. It must be a
+    new-AdDomain with build profile support (include\BuildProfile.ps1).
+.PARAMETER ProfilePath
+    A build profile (.psd1) for this run, accepted in all four modes. It is copied over
+    include\build-profile.psd1 in the staged copy of new-AdDomain, so the guest builds
+    from it. Without it, a build-profile.psd1 in the source new-AdDomain is used if there
+    is one (with a WARN), otherwise none. Must name an existing .psd1 file.
 .PARAMETER GuestReadyTimeoutMinutes
     How long to wait for a guest to answer guest operations, and how long to wait for the
     DC's promotion reboot after ntds.dit appears. Default 20. Checked between polls, so
@@ -198,6 +226,15 @@
     # the joined SRVR-NN member servers from CN=Computers to OU=Servers.
     $pw = Read-Host -Prompt 'Guest Administrator password' -AsSecureString
     .\build-lab.ps1 -MoveMemberServers -AdminPassword $pw -VmStoragePath 'C:\VMs' -VmName 'LabServer01'
+.EXAMPLE
+    # A full build of a different forest from a build profile kept outside both
+    # repositories, for example C:\LabProfiles\corp.psd1 holding
+    #   @{ DomainName = 'corp.example.test'; NetBIOSName = 'CORP'; PrimarySiteName = 'Corp-HQ' }
+    # Later -AddMemberServers and -MoveMemberServers runs against this DC pass the same file.
+    $pw = Read-Host -Prompt 'Guest Administrator password' -AsSecureString
+    .\build-lab.ps1 -IsoPath 'C:\ISOs\WS2025.iso' -AdminPassword $pw -VmStoragePath 'C:\VMs' `
+        -VmName 'CORPDC01' -ComputerName 'CORPDC01' -StaticIpAddress '192.168.220.50' `
+        -DefaultGateway '192.168.220.2' -ProfilePath 'C:\LabProfiles\corp.psd1'
 .OUTPUTS
     None to the pipeline. Progress goes to the console and to logs\build-lab_<timestamp>.log;
     WARN, ERROR and FATAL rows also go to logs\build-lab-errors_<timestamp>.csv; key events go
@@ -206,9 +243,9 @@
     logs\guest-<timestamp>\. A failure ends in a terminating error (exit code 1 under
     powershell.exe -File).
 .NOTES
-    Version:      2.0.0
+    Version:      2.1.0
     Author:       Daniel Owen
-    Release Date: 2026-10-26
+    Release Date: 2026-11-05
     Requirements: VMware Workstation 17+ (vmrun.exe), Windows PowerShell 5.1 (Desktop
                   edition, enforced by #Requires), local
                   Administrator on the host for Application event log source
@@ -291,6 +328,10 @@ param (
     #   AdDomainSourcePath  -> $PSScriptRoot\..\new-AdDomain
     [string]$VmBuilderScriptPath,
     [string]$AdDomainSourcePath,
+
+    # A build profile (.psd1), in every parameter set. Checked in the body after logging
+    # starts (Confirm-BuildProfilePath), so a bad path is logged like any other stop.
+    [string]$ProfilePath,
 
     [ValidateRange(1, 120)]
     [int]$GuestReadyTimeoutMinutes = 20,
@@ -635,9 +676,12 @@ function Wait-GuestOperationsReady {
     throw "Guest operations did not become ready within $TimeoutMinutes minute(s). Last probe reason: $notReadyReason Check the VM console for setup progress, verify VMware Tools is installed, and confirm the Administrator credentials."
 }
 
-function New-AdDomainPayloadArchive {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
-        Justification = 'Internal build step that stages a host-side copy of new-AdDomain into a disposable temp folder and zips it; -WhatIf support would not meaningfully apply.')]
+function Copy-AdDomainPayloadToStaging {
+    # Copies new-AdDomain once into <StagingRootPath>\new-AdDomain and returns that path.
+    # Every later step works on this staged copy: the build profile is placed in it, it is
+    # read and checked on the host, and the DC payload zip is made from it, so the guest
+    # gets exactly the files that were checked. A source build-profile.psd1 comes along,
+    # because the exclusions below do not name it.
     param (
         [Parameter(Mandatory)]
         [string]$SourcePath,
@@ -663,12 +707,134 @@ function New-AdDomainPayloadArchive {
         $robocopyErrorText = (@($robocopyOutput) | Where-Object { $_ } | Select-Object -Last 10) -join ' '
         throw "robocopy failed copying '$SourcePath' to '$stagingPayloadPath' (exit code $robocopyExitCode). robocopy output: $robocopyErrorText"
     }
+    return $stagingPayloadPath
+}
 
+function ConvertTo-FullFileSystemPath {
+    # Returns -Path as a full file system path with any '..' segments removed. A relative
+    # path resolves against PowerShell's current location, as a native command would see
+    # it, not the process directory. The path does not have to exist.
+    param (
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    return [System.IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path))
+}
+
+function Confirm-BuildProfilePath {
+    # Checks -ProfilePath and returns it as a full path. Throws with a descriptive message
+    # when it names no file, names a folder, or is not a .psd1 (in any case).
+    param (
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$ProfilePath
+    )
+    if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
+        throw "-ProfilePath '$ProfilePath' names no file. Pass the full path of an existing build profile (.psd1), or leave -ProfilePath out."
+    }
+    $fullProfilePath = ConvertTo-FullFileSystemPath -Path $ProfilePath
+    if (-not (Test-Path -LiteralPath $fullProfilePath)) {
+        throw "-ProfilePath '$fullProfilePath' names no file. Pass the full path of an existing build profile (.psd1), or leave -ProfilePath out."
+    }
+    if (Test-Path -LiteralPath $fullProfilePath -PathType Container) {
+        throw "-ProfilePath '$fullProfilePath' names a folder, not a file. Pass the full path of a build profile (.psd1)."
+    }
+    if ([System.IO.Path]::GetExtension($fullProfilePath) -ne '.psd1') {
+        throw "-ProfilePath '$fullProfilePath' is not a .psd1 file. A build profile is a PowerShell data file (.psd1), which build-lab and new-AdDomain read without running it."
+    }
+    return $fullProfilePath
+}
+
+function Set-StagedBuildProfile {
+    # Decides which build profile the run uses and puts it in place in the staged copy:
+    #   1. no -ProfilePath, no source profile:  no profile (INFO)
+    #   2. no -ProfilePath, source profile:     the source profile (WARN, path and SHA-256),
+    #                                           because a file nobody named on the command
+    #                                           line then decides which forest is built
+    #   3. -ProfilePath, no source profile, or -ProfilePath IS the source profile:
+    #                                           -ProfilePath (INFO, path and SHA-256)
+    #   4. -ProfilePath, a different source profile: -ProfilePath (WARN that the source
+    #                                           profile was replaced, then the row 3 INFO)
+    # Whether the source has a profile is read from the staged copy, which robocopy filled
+    # from the source a moment earlier, so the decision and the staged file always agree.
+    # The SHA-256 is the staged file's, the file the guest gets. Only the staged copy is
+    # written; the source profile and -ProfilePath are never changed.
+    #
+    # Returns { Row; ProfileInUse; OriginPath; StagedProfilePath; Sha256; LogEntries },
+    # where LogEntries is the ordered list of { Level; Message } lines for the caller to log.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Writes only into the disposable per-run staging folder; -WhatIf support would not meaningfully apply.')]
+    param (
+        [Parameter(Mandatory)]
+        [string]$StagedPayloadPath,
+        # The source new-AdDomain's include\build-profile.psd1, as a full path. Used to name
+        # it in the log and to recognize -ProfilePath pointing at it.
+        [Parameter(Mandatory)]
+        [string]$SourceProfilePath,
+        # Full path, already checked by Confirm-BuildProfilePath.
+        [string]$ProfilePath
+    )
+    $stagedProfilePath   = Join-Path -Path $StagedPayloadPath -ChildPath 'include\build-profile.psd1'
+    $sourceProfileStaged = Test-Path -LiteralPath $stagedProfilePath -PathType Leaf
+    $logEntries          = @()
+
+    if (-not $ProfilePath) {
+        if (-not $sourceProfileStaged) {
+            $logEntries += [pscustomobject]@{ Level = 'INFO'; Message = "No build profile. -ProfilePath was not given and '$SourceProfilePath' does not exist, so the build uses the global-config.ps1 values." }
+            return [pscustomobject]@{ Row = 1; ProfileInUse = $false; OriginPath = $null; StagedProfilePath = $null; Sha256 = $null; LogEntries = $logEntries }
+        }
+        $stagedProfileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedProfilePath).Hash
+        $logEntries += [pscustomobject]@{ Level = 'WARN'; Message = "Source build profile used: '$SourceProfilePath' (SHA-256 $stagedProfileHash), staged for the guest as '$stagedProfilePath'. It was not named with -ProfilePath, yet it decides which forest is built. Pass a profile with -ProfilePath to choose one on purpose, or remove that file to build without one." }
+        return [pscustomobject]@{ Row = 2; ProfileInUse = $true; OriginPath = $SourceProfilePath; StagedProfilePath = $stagedProfilePath; Sha256 = $stagedProfileHash; LogEntries = $logEntries }
+    }
+
+    # -eq on strings ignores case, as Windows paths do.
+    $profilePathIsSourceProfile = $sourceProfileStaged -and ($ProfilePath -eq $SourceProfilePath)
+    $row = 3
+    if ($sourceProfileStaged -and -not $profilePathIsSourceProfile) {
+        $row = 4
+        $logEntries += [pscustomobject]@{ Level = 'WARN'; Message = "Source build profile replaced: '$SourceProfilePath' was overwritten in the staged payload by -ProfilePath. The guest gets the -ProfilePath file. Remove the source profile to stop this warning." }
+    }
+    Copy-Item -LiteralPath $ProfilePath -Destination $stagedProfilePath -Force
+    $stagedProfileHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedProfilePath).Hash
+    $logEntries += [pscustomobject]@{ Level = 'INFO'; Message = "Build profile from -ProfilePath: '$ProfilePath' (SHA-256 $stagedProfileHash), staged for the guest as '$stagedProfilePath'." }
+    return [pscustomobject]@{ Row = $row; ProfileInUse = $true; OriginPath = $ProfilePath; StagedProfilePath = $stagedProfilePath; Sha256 = $stagedProfileHash; LogEntries = $logEntries }
+}
+
+function ConvertTo-OriginProfilePathText {
+    # new-AdDomain's validator names the profile by the path it read, which on the host is
+    # the staged copy in a temp folder this run deletes. This puts the file the operator
+    # passed (or the source profile) in its place, so each line names the file to edit.
+    # The match is literal and ignores case. Without a staged path the text is unchanged.
+    param (
+        [AllowEmptyCollection()]
+        [string[]]$Text = @(),
+        [string]$StagedProfilePath,
+        [string]$OriginPath
+    )
+    if (-not $StagedProfilePath -or -not $OriginPath) { return $Text }
+    $stagedPathPattern = [regex]::Escape($StagedProfilePath)
+    # In a replacement string '$' is special, so a '$' in the path is doubled.
+    $originReplacement = $OriginPath.Replace('$', '$$')
+    return @($Text | Where-Object { $null -ne $_ } | ForEach-Object { [regex]::Replace($_, $stagedPathPattern, $originReplacement, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) })
+}
+
+function New-AdDomainPayloadArchive {
+    # Zips the staged new-AdDomain folder (Copy-AdDomainPayloadToStaging) for the DC. The
+    # zip keeps the new-AdDomain root folder, which the guest expands into C:\temp.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+        Justification = 'Internal build step that zips the staged copy of new-AdDomain inside a disposable temp folder; -WhatIf support would not meaningfully apply.')]
+    param (
+        [Parameter(Mandatory)]
+        [string]$StagedPayloadPath,
+        [Parameter(Mandatory)]
+        [string]$StagingRootPath
+    )
     $payloadZipFilePath = Join-Path -Path $StagingRootPath -ChildPath 'new-AdDomain.zip'
     if (Test-Path -LiteralPath $payloadZipFilePath) {
         Remove-Item -LiteralPath $payloadZipFilePath -Force
     }
-    Compress-Archive -Path $stagingPayloadPath -DestinationPath $payloadZipFilePath -Force
+    Compress-Archive -Path $StagedPayloadPath -DestinationPath $payloadZipFilePath -Force
 
     return $payloadZipFilePath
 }
@@ -1169,39 +1335,86 @@ function Get-VmBuilderArgumentTable {
 }
 
 function Get-AdDomainIdentity {
-    # Reads the domain identity from new-AdDomain's global-config.ps1, the same file the
-    # forest promotion itself reads. Within one full build the join target therefore matches
-    # the forest just built. A later -AddMemberServers or -MoveMemberServers run reads the
-    # file again, so if it was edited in between, the values no longer match the existing
-    # DC. Those two modes therefore cross-check the domain against the DC itself
+    # Reads the domain identity and the build profile results from the STAGED copy of
+    # new-AdDomain's global-config.ps1 (Copy-AdDomainPayloadToStaging), the same files the
+    # guest gets. global-config.ps1 loads include\BuildProfile.ps1, applies the build
+    # profile in its folder over its own values, validates the result, and leaves the
+    # effective values plus $buildProfileSummary, $buildProfileInfo, $buildProfileWarnings
+    # and $buildProfileError behind. It never throws for a profile problem. A later
+    # -AddMemberServers or -MoveMemberServers run reads its own staged copy, so if the
+    # configuration changed in between, the values no longer match the existing DC. Those
+    # two modes therefore cross-check the domain against the DC itself
     # (Compare-DomainControllerIdentity) before acting on it.
     #
     # The file is a .ps1, so reading it means dot-sourcing (executing) it. That happens
-    # inside this function so the config's variables land in function scope and are
-    # discarded on return, rather than overwriting same-named variables in this script
-    # (global-config.ps1 defines $logPath, for one).
+    # inside this function so the config's variables and the functions it loads land in
+    # function scope and are discarded on return, rather than overwriting same-named
+    # variables in this script (global-config.ps1 defines $logPath, for one). Every variable
+    # read below is set to $null first, so a value the file does not set can never be read
+    # from a caller's scope. The guest scripts load the same file under
+    # $ErrorActionPreference = 'Stop', so this function does too, to make the host's
+    # check behave like the guest's. Any output the file writes is discarded, so it cannot
+    # turn the return value into an array.
+    #
+    # Checks, in order: a build profile error (returned for the caller to log, ahead of the
+    # check below, which it would otherwise mask, because the derived values are not set
+    # after an error), a new-AdDomain without build profile support (throws), the identity
+    # values (throws), then the service account SPN placeholders on the staged CSV.
+    #
+    # Returns { DomainName; NetBIOSName; DomainDN; ServersOU; PrimarySubnet; Summary; Info;
+    # Warnings; Error; PlaceholderRows }. Info, Warnings and PlaceholderRows are arrays.
+    # Error is $null or the error text, which may hold several lines.
     param (
         [Parameter(Mandatory)]
-        [string]$GlobalConfigPath
+        [string]$GlobalConfigPath,
+        # The source new-AdDomain, named when it has no build profile support. Default:
+        # the folder two levels above -GlobalConfigPath.
+        [string]$AdDomainSourcePath
     )
     if (-not (Test-Path -LiteralPath $GlobalConfigPath -PathType Leaf)) {
         throw "Domain configuration not found at '$GlobalConfigPath'. Member servers take the domain name from new-AdDomain\include\global-config.ps1. Pass -AdDomainSourcePath if new-AdDomain is not a sibling of this project."
     }
-    $domainName  = $null
-    $netBIOSName = $null
-    $domainDN    = $null
-    $serversOU   = $null
-    . $GlobalConfigPath
+    if (-not $AdDomainSourcePath) {
+        $AdDomainSourcePath = Split-Path -Path (Split-Path -Path $GlobalConfigPath -Parent) -Parent
+    }
 
-    if (-not $domainName -or -not $netBIOSName -or -not $domainDN -or -not $serversOU) {
-        throw "'$GlobalConfigPath' did not define all of `$domainName, `$netBIOSName, `$domainDN and `$serversOU. Check the Domain Identity and OU Structure regions of that file."
+    $ErrorActionPreference = 'Stop'
+    $domainName           = $null
+    $netBIOSName          = $null
+    $domainDN             = $null
+    $serversOU            = $null
+    $primarySubnet        = $null
+    $csvPath              = $null
+    $buildProfileSummary  = $null
+    $buildProfileInfo     = $null
+    $buildProfileWarnings = $null
+    $buildProfileError    = $null
+    $null = . $GlobalConfigPath
+
+    $domainIdentity = [pscustomobject]@{
+        DomainName      = $domainName
+        NetBIOSName     = $netBIOSName
+        DomainDN        = $domainDN
+        ServersOU       = $serversOU
+        PrimarySubnet   = $primarySubnet
+        Summary         = $buildProfileSummary
+        Info            = @($buildProfileInfo | Where-Object { $null -ne $_ })
+        Warnings        = @($buildProfileWarnings | Where-Object { $null -ne $_ })
+        Error           = $(if ($buildProfileError) { [string]$buildProfileError } else { $null })
+        PlaceholderRows = @()
     }
-    return [pscustomobject]@{
-        DomainName  = $domainName
-        NetBIOSName = $netBIOSName
-        DomainDN    = $domainDN
-        ServersOU   = $serversOU
+    if ($domainIdentity.Error) {
+        return $domainIdentity
     }
+    if (-not (Get-Command -Name 'Test-ServicePrincipalNamePlaceholder' -CommandType Function -ErrorAction SilentlyContinue)) {
+        throw "'$AdDomainSourcePath' is a new-AdDomain without build profile support: include\global-config.ps1 did not load include\BuildProfile.ps1. This version of build-lab needs a new-AdDomain that has it. Update new-AdDomain, or point -AdDomainSourcePath at one that has it."
+    }
+    if (-not $domainName -or -not $netBIOSName -or -not $domainDN -or -not $serversOU -or -not $csvPath) {
+        throw "'$GlobalConfigPath' did not define all of `$domainName, `$netBIOSName, `$domainDN, `$serversOU and `$csvPath. Check the Domain Identity, OU Structure and File Paths regions of that file."
+    }
+    $serviceAccountCsvPath = Join-Path -Path $csvPath -ChildPath 'serviceaccounts.csv'
+    $domainIdentity.PlaceholderRows = @(Test-ServicePrincipalNamePlaceholder -CsvPath $serviceAccountCsvPath -DomainName $domainName | Where-Object { $null -ne $_ })
+    return $domainIdentity
 }
 
 function ConvertTo-IpAddressNumber {
@@ -1221,6 +1434,28 @@ function ConvertFrom-IpAddressNumber {
         [long]$IpAddressNumber
     )
     return (@(24, 16, 8, 0) | ForEach-Object { ($IpAddressNumber -shr $_) -band 255 }) -join '.'
+}
+
+function Test-IpAddressInSubnet {
+    # Returns $true when -IpAddress lies inside -Subnet (IPv4 CIDR, a.b.c.d/n), the same
+    # containment rule the guest applies to an explicit PrimarySubnet. Used for the early
+    # address check. Throws on a subnet that is not CIDR: new-AdDomain's validator refuses
+    # a malformed PrimarySubnet before this runs, so a throw here means that check failed.
+    param (
+        [Parameter(Mandatory)]
+        [string]$IpAddress,
+        [Parameter(Mandatory)]
+        [string]$Subnet
+    )
+    $subnetMatch = [regex]::Match($Subnet, '^(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})$')
+    if (-not $subnetMatch.Success -or [int]$subnetMatch.Groups[2].Value -gt 32) {
+        throw "Subnet '$Subnet' is not an IPv4 subnet in CIDR form (a.b.c.d/n)."
+    }
+    $prefixLength = [int]$subnetMatch.Groups[2].Value
+    $maskNumber   = if ($prefixLength -eq 0) { [long]0 } else { ([long]4294967295 -shl (32 - $prefixLength)) -band [long]4294967295 }
+    $subnetNumber = ConvertTo-IpAddressNumber -IpAddress $subnetMatch.Groups[1].Value
+    $addressNumber = ConvertTo-IpAddressNumber -IpAddress $IpAddress
+    return (($addressNumber -band $maskNumber) -eq ($subnetNumber -band $maskNumber))
 }
 
 function Confirm-DomainControllerAddress {
@@ -1473,12 +1708,15 @@ function Get-GuestDomainComputerName {
 function Compare-DomainControllerIdentity {
     # Compares what the DC reports (Get-GuestDomainControllerIdentity) with what this run
     # was told. Returns one message per mismatch; an empty result means everything matches.
-    # Expected values that are not supplied are not checked.
+    # Expected values that are not supplied are not checked. -ExpectedDomainSource names
+    # where the expected domain came from in the mismatch message: global-config.ps1, or
+    # the build profile when the run uses one.
     param (
         [Parameter(Mandatory)]
         [object]$Identity,
         [Parameter(Mandatory)]
         [string]$ExpectedDomainName,
+        [string]$ExpectedDomainSource = 'global-config.ps1',
         [string]$ExpectedIpAddress,
         [int]$ExpectedPrefixLength,
         [string]$ExpectedDefaultGateway
@@ -1489,7 +1727,7 @@ function Compare-DomainControllerIdentity {
         $mismatches += "it is not a domain controller (Win32_ComputerSystem.DomainRole = $($Identity.DomainRole))"
     }
     if ($Identity.Domain -ne $ExpectedDomainName) {
-        $mismatches += "it is in domain '$($Identity.Domain)', but global-config.ps1 names '$ExpectedDomainName'"
+        $mismatches += "it is in domain '$($Identity.Domain)', but $ExpectedDomainSource names '$ExpectedDomainName'"
     }
     if ($ExpectedIpAddress) {
         $reportedAddresses = @($Identity.Ipv4Addresses)
@@ -2081,7 +2319,7 @@ function Show-PostBuildManualStepNotice {
 #region Variables
 # Printed in the starting log line so every log shows which version ran. Keep it in step
 # with Version in .NOTES.
-$scriptVersion      = '2.0.0'
+$scriptVersion      = '2.1.0'
 $enableEventLogging = $true
 $eventLogSourceName = 'build-lab'
 $guestUserName      = 'Administrator'
@@ -2158,6 +2396,18 @@ try {
     if (-not (Test-Path -LiteralPath $adForestDeploymentScriptPath -PathType Leaf)) {
         throw "New-ADForestDeployment.ps1 not found at '$adForestDeploymentScriptPath'. Pass -AdDomainSourcePath if new-AdDomain is not a sibling of this project."
     }
+    if (-not (Test-Path -LiteralPath $adDomainGlobalConfigPath -PathType Leaf)) {
+        throw "Domain configuration not found at '$adDomainGlobalConfigPath'. The domain and the build profile are read from new-AdDomain\include\global-config.ps1. Pass -AdDomainSourcePath if new-AdDomain is not a sibling of this project."
+    }
+    # The source new-AdDomain as a full path, so the log names its build profile without
+    # '..' segments and -ProfilePath can be recognized when it names that same file.
+    $adDomainSourceFullPath = ConvertTo-FullFileSystemPath -Path $AdDomainSourcePath
+    $sourceBuildProfilePath = Join-Path -Path $adDomainSourceFullPath -ChildPath 'include\build-profile.psd1'
+    # Bound with any value (even an empty one) means a profile was asked for, so it is checked.
+    $buildProfilePath = $null
+    if ($PSBoundParameters.ContainsKey('ProfilePath')) {
+        $buildProfilePath = Confirm-BuildProfilePath -ProfilePath $ProfilePath
+    }
 
     # -SkipVmBuild re-runs the DC guest phase. Combined with members it would do that to a
     # working DC, wiping its payload folder and logs and relaunching the forest deployment.
@@ -2192,10 +2442,64 @@ try {
     }
     $guestCredential = [PSCredential]::new($guestUserName, $AdminPassword)
 
+    # Stage new-AdDomain once, put the build profile in place, then read and check the
+    # staged copy. Every mode needs the result: the move and the add check the existing DC
+    # against it, members join it, and a full build verifies its promotion against it and
+    # ships this same staged folder to the DC. Doing it here stops on a bad profile or
+    # config before anything is pinged, built or changed.
+    Write-Log "Staging new-AdDomain from '$adDomainSourceFullPath' into '$stagingRootPath'..." -Level INFO
+    $stagedPayloadPath     = Copy-AdDomainPayloadToStaging -SourcePath $AdDomainSourcePath -StagingRootPath $stagingRootPath
+    $buildProfileSelection = Set-StagedBuildProfile -StagedPayloadPath $stagedPayloadPath -SourceProfilePath $sourceBuildProfilePath -ProfilePath $buildProfilePath
+    foreach ($buildProfileLogEntry in $buildProfileSelection.LogEntries) {
+        Write-Log $buildProfileLogEntry.Message -Level $buildProfileLogEntry.Level
+    }
+
+    $domainIdentity = Get-AdDomainIdentity -GlobalConfigPath (Join-Path -Path $stagedPayloadPath -ChildPath 'include\global-config.ps1') -AdDomainSourcePath $adDomainSourceFullPath
+    # The validator names the staged profile; each line is logged naming the origin file.
+    $originPathParameters = @{ StagedProfilePath = $buildProfileSelection.StagedProfilePath; OriginPath = $buildProfileSelection.OriginPath }
+    if ($domainIdentity.Summary) {
+        Write-Log (@(ConvertTo-OriginProfilePathText -Text @($domainIdentity.Summary) @originPathParameters) -join ' ') -Level INFO
+    }
+    foreach ($buildProfileInfoLine in @(ConvertTo-OriginProfilePathText -Text $domainIdentity.Info @originPathParameters)) {
+        Write-Log $buildProfileInfoLine -Level INFO
+    }
+    foreach ($buildProfileWarningLine in @(ConvertTo-OriginProfilePathText -Text $domainIdentity.Warnings @originPathParameters)) {
+        Write-Log $buildProfileWarningLine -Level WARN
+    }
+    if ($domainIdentity.Error) {
+        # One stop per line, each starting with its source. Each is logged on its own line.
+        $buildProfileErrorLines = @(ConvertTo-OriginProfilePathText -Text @($domainIdentity.Error -split '\r?\n' | Where-Object { $_.Trim() }) @originPathParameters)
+        foreach ($buildProfileErrorLine in $buildProfileErrorLines) {
+            Write-Log $buildProfileErrorLine -Level ERROR
+        }
+        throw "The build configuration is not valid, so build-lab stopped before any VM was built or changed. $($buildProfileErrorLines -join ' ')"
+    }
+    if ($domainIdentity.PlaceholderRows.Count -gt 0) {
+        $sourceServiceAccountCsvPath = Join-Path -Path $adDomainSourceFullPath -ChildPath 'config\serviceaccounts.csv'
+        $placeholderRowText = (@($domainIdentity.PlaceholderRows) | ForEach-Object { "'$($_.Name)' SPN '$($_.ServicePrincipalName)'" }) -join '; '
+        throw "'$sourceServiceAccountCsvPath' has SPNs that still hold '{' or '}' after {DomainName} is substituted, so build-lab stopped before any VM was built or changed. Rows: $placeholderRowText. The only placeholder is {DomainName}, in any case. Fix those rows."
+    }
+    # Where the expected domain came from, for the DC cross-check's mismatch message.
+    $domainIdentitySource = if ($buildProfileSelection.ProfileInUse) { "the build profile '$($buildProfileSelection.OriginPath)'" } else { 'global-config.ps1' }
+
     # The DC's own address and the gateway: the address the DC is about to get (full build)
     # or already has (-AddMemberServers). Not supplied for -SkipVmBuild / -MoveMemberServers.
     if ($StaticIpAddress) {
         Confirm-DomainControllerAddress -IpAddress $StaticIpAddress -SubnetMask $SubnetMask -NetworkType $NetworkType -DefaultGateway $DefaultGateway
+    }
+    # Early address check, full build only. -SkipVmBuild never has -StaticIpAddress (the
+    # guest makes this check itself), and the add and move modes never run population, so
+    # the subnet is not used there. The guest makes the real decision on the real address.
+    if ($activeParameterSet -eq 'Build') {
+        if ($domainIdentity.PrimarySubnet -eq 'Auto') {
+            Write-Log "Early address check: PrimarySubnet is Auto, so the guest works out the subnet from the DC's own address." -Level INFO
+        }
+        elseif (Test-IpAddressInSubnet -IpAddress $StaticIpAddress -Subnet $domainIdentity.PrimarySubnet) {
+            Write-Log "Early address check: PrimarySubnet $($domainIdentity.PrimarySubnet) contains the DC's address $StaticIpAddress." -Level INFO
+        }
+        else {
+            Write-Log "Early address check: PrimarySubnet $($domainIdentity.PrimarySubnet) does not contain the DC's address $StaticIpAddress. The guest will use Auto, the subnet of the DC's own address, instead, and its `"Requested subnet`" test row will fail. To keep the subnet you asked for, change PrimarySubnet in the build profile or global-config.ps1, or the DC's -StaticIpAddress." -Level WARN
+        }
     }
     # Before a static address is given to a new VM, make sure nothing already answers at it.
     # Only a full build assigns the DC an address; -AddMemberServers expects the DC to answer.
@@ -2205,12 +2509,6 @@ try {
         }
         Write-Log "-StaticIpAddress $StaticIpAddress does not answer ping, so it is treated as free. (A host that blocks ping would not show up.)" -Level INFO
     }
-
-    # Domain identity from new-AdDomain's global-config.ps1. Every mode needs it: the move
-    # and the add check the existing DC against it, members join it, and a full build
-    # verifies its promotion against it. Reading it here fails a broken config before
-    # anything is built.
-    $domainIdentity = Get-AdDomainIdentity -GlobalConfigPath $adDomainGlobalConfigPath
 
     if ($MoveMemberServers) {
         # Separate later step: move joined member servers to OU=Servers on the existing DC.
@@ -2230,12 +2528,13 @@ try {
         Wait-GuestOperationsReady -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential -TimeoutMinutes $GuestReadyTimeoutMinutes
         Initialize-GuestTempDirectory -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential
 
-        # global-config.ps1 is read again on this run, so confirm it still describes this DC.
+        # The configuration is read again on this run, so confirm it still describes this DC.
         $domainControllerIdentity = Get-GuestDomainControllerIdentity -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential `
             -HostStagingPath $stagingRootPath
-        $identityMismatches = @(Compare-DomainControllerIdentity -Identity $domainControllerIdentity -ExpectedDomainName $domainIdentity.DomainName)
+        $identityMismatches = @(Compare-DomainControllerIdentity -Identity $domainControllerIdentity -ExpectedDomainName $domainIdentity.DomainName `
+            -ExpectedDomainSource $domainIdentitySource)
         if ($identityMismatches.Count -gt 0) {
-            throw "Nothing was moved: the VM at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Check -VmStoragePath and -VmName, and new-AdDomain's global-config.ps1."
+            throw "Nothing was moved: the VM at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Check -VmStoragePath and -VmName, the build profile, and new-AdDomain's global-config.ps1."
         }
 
         $memberServerOuState = Get-GuestMemberServerOuState @memberServerOuParameters
@@ -2290,9 +2589,9 @@ try {
         $domainControllerIdentity = Get-GuestDomainControllerIdentity -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential `
             -HostStagingPath $stagingRootPath
         $identityMismatches = @(Compare-DomainControllerIdentity -Identity $domainControllerIdentity -ExpectedDomainName $domainIdentity.DomainName `
-            -ExpectedIpAddress $StaticIpAddress -ExpectedPrefixLength $staticIpPrefixLength -ExpectedDefaultGateway $DefaultGateway)
+            -ExpectedDomainSource $domainIdentitySource -ExpectedIpAddress $StaticIpAddress -ExpectedPrefixLength $staticIpPrefixLength -ExpectedDefaultGateway $DefaultGateway)
         if ($identityMismatches.Count -gt 0) {
-            throw "No member servers were built: the DC at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Pass the DC's real -StaticIpAddress, -SubnetMask and -DefaultGateway, and check new-AdDomain's global-config.ps1."
+            throw "No member servers were built: the DC at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Pass the DC's real -StaticIpAddress, -SubnetMask and -DefaultGateway, and check the build profile and new-AdDomain's global-config.ps1."
         }
         $gatewayCheckDetail = if ($DefaultGateway) { "gateway $DefaultGateway matches" } else { 'gateway not checked and not set on the members, because -DefaultGateway was not given' }
         Write-Log "Existing DC verified ('$ntdsFilePath' present; domain and address match; $gatewayCheckDetail)." -Level SUCCESS
@@ -2373,8 +2672,9 @@ try {
             }
         }
 
-        Write-Log "Staging and copying new-AdDomain payload to guest..." -Level INFO
-        $payloadZipFilePath = New-AdDomainPayloadArchive -SourcePath $AdDomainSourcePath -StagingRootPath $stagingRootPath
+        # The zip is made from the staged folder checked above, not from a second copy.
+        Write-Log "Zipping the staged new-AdDomain payload and copying it to the guest..." -Level INFO
+        $payloadZipFilePath = New-AdDomainPayloadArchive -StagedPayloadPath $stagedPayloadPath -StagingRootPath $stagingRootPath
         Copy-PayloadToGuest -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential -PayloadZipFilePath $payloadZipFilePath
         Write-Log "Payload deployed to C:\temp\new-AdDomain in guest." -Level SUCCESS
         Write-AppEvent -Enabled $enableEventLogging -SourceName $eventLogSourceName -EntryType Information -EventId 1200 -Message 'new-AdDomain payload deployed to guest.'

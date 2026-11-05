@@ -1,3 +1,5 @@
+![build-lab banner showing an imp (Fizmo) in a work apron, holding a screwdriver and leaning on a tower server](images/Logos/build-lab-mascot-banner-wide.jpg)
+
 # build-lab
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -20,7 +22,7 @@ What I could not find was one command that goes the whole way, ISO to a domain w
 `build-lab.ps1` is an orchestrator. It does not build a VM or promote a forest itself. It drives two sibling projects and stitches them together so one command takes you from an ISO to a promoted domain controller. Specifically:
 
 1. Calls `New-VMwareWorkstationVM.ps1` to create and start a Windows Server 2025 VM with the CPU, RAM, disk, and static network settings you pass in.
-2. Zips the `new-AdDomain` project on the host and pushes it into the guest at `C:\temp\new-AdDomain` over vmrun VIX guest operations, then verifies the payload landed.
+2. Copies the `new-AdDomain` project into a staging folder on the host, drops in your [build profile](#build-profiles) if you gave one, and checks the staged copy before anything is built. Then it zips that same copy, pushes it into the guest at `C:\temp\new-AdDomain` over vmrun VIX guest operations, and verifies the payload landed.
 3. Launches `New-ADForestDeployment.ps1 -CreateScheduledTask` inside the guest to install AD DS and promote the forest.
 4. If you asked for member servers, builds them one at a time with the same VM builder (`SRVR-01`, `SRVR-02`, and so on) and joins each one to the new domain as a plain member.
 
@@ -54,6 +56,7 @@ And one thing requires a tiny bit of your effort. Creating OUs, users, groups, t
 ## Features
 
 - One command takes you from an ISO to a promoted domain controller. No GUI, no answer-file editing, no clicking Next.
+- Build profiles. `-ProfilePath` builds a different forest from a small `.psd1` file, and neither repository gets edited.
 - Promotion is confirmed by evidence from the guest, not by trusting a process that reboots out from under you. `ntds.dit` has to be on disk, the DC has to reboot, and it has to come back as a domain controller in the right domain.
 - Member servers on request. `-MemberServerCount` builds and joins them after the DC is verified, and `-AddMemberServers` adds more to a DC you already have without touching the DC.
 - `-MoveMemberServers` files those members into `OU=Servers` once directory population has created it.
@@ -65,9 +68,30 @@ And one thing requires a tiny bit of your effort. Creating OUs, users, groups, t
 
 ## What's Changed Since 1.0
 
-1.0 built one domain controller. The current version still does that, the same way, and adds member servers plus a fair amount of hardening that came out of reviews and live runs.
+1.0 built one domain controller. The current version still does that, the same way, and adds member servers, build profiles, and a fair amount of hardening that came out of reviews and live runs.
 
-### New
+**Thinking of upgrading?** 2.1 is a feature release, not a bug fix. If you don't need anything below, you may do better waiting for the next version. That one is planned to keep every setting you might change in an override file that upgrades leave alone, with a small script that moves your current edits into it. If you do upgrade now, [UPGRADE.md](UPGRADE.md) has the steps from 2.0 and from 1.0.
+
+### New in 2.1
+
+#### Breaking for 2.0 users
+
+Updating from 2.0 changes three things you may rely on. The first two stop the run before anything is built or changed, and the message tells you what to do. The third stops nothing, which is exactly why it is on this list.
+
+1. **Update new-AdDomain at the same time.** build-lab 2.1 refuses new-AdDomain 1.0. Put new-AdDomain 2.0 next to it, or point `-AdDomainSourcePath` at a 2.0 copy.
+2. **A DC built by 2.0 needs a profile for member work.** That DC is in `lab.local`, so `-AddMemberServers` and `-MoveMemberServers` against it stop at the DC check. Pass the `lab.local` profile from [A DC built before lab.test](#a-dc-built-before-labtest).
+3. **The same full-build command now builds `lab.test`.** A command line that gave you `lab.local` under 2.0 gives you `lab.test` under 2.1, with no warning. Pass that same profile to a full build if you want `lab.local` back, and expect a WARN reminding you that `.local` is reserved for multicast DNS.
+
+#### Everything else in 2.1
+
+- **Build profiles.** `-ProfilePath` takes a `.psd1` file that names the domain, the NetBIOS name, the site and a few other settings, and builds that forest instead of the default. See [Build Profiles](#build-profiles).
+- **A WARN when a file you did not name picks the forest.** A `build-profile.psd1` left sitting in the `new-AdDomain` folder still gets used, and the log names it with its SHA-256.
+- **The staged copy is checked before anything is built.** A bad profile, a bad `global-config.ps1` value, or a misspelled SPN placeholder in `serviceaccounts.csv` stops the run before a VM exists. The guest then runs exactly the files that were checked.
+- **An early address check.** An explicit `PrimarySubnet` that does not contain the DC's address gets a WARN before the build starts, instead of a surprise after it.
+- **It needs new-AdDomain 2.0.** build-lab 2.1 checks the staged copy with new-AdDomain's own `include\BuildProfile.ps1`, which first ships in new-AdDomain 2.0. Point it at a 1.0 copy and it stops before anything is built, with a message that says so. new-AdDomain 2.0 is also where most of the changes inside the guest come from. The DC lands in its own renamed site with its own subnet, `Win2025` functional levels work, the service account SPNs follow the domain, and the test results file grows from nine rows to fifteen. See [what changed in new-AdDomain](https://github.com/0x44616e69656c/new-AdDomain#whats-changed-since-10).
+- **The default domain is now `lab.test`.** That change lives in `new-AdDomain`. A DC built earlier is in `lab.local`, so `-AddMemberServers` and `-MoveMemberServers` against it need a profile. See [A DC built before lab.test](#a-dc-built-before-labtest).
+
+### New in 2.0
 
 - **Member servers.** `-MemberServerCount` builds `SRVR-NN` member servers after the DC's promotion is verified and joins them to the domain. They have their own size parameters. See [Member Servers](#member-servers).
 - **`-AddMemberServers`.** Adds member servers to an existing DC. The DC is checked, never changed.
@@ -94,7 +118,7 @@ And one thing requires a tiny bit of your effort. Creating OUs, users, groups, t
 
 ## Screenshots
 
-**1. The built-in help.** `Get-Help .\build-lab.ps1 -Examples` gives you the synopsis and the invocation patterns without opening the script. This screenshot is from 1.0. The help now carries five examples, including the member server modes.
+**1. The built-in help.** `Get-Help .\build-lab.ps1 -Examples` gives you the synopsis and the invocation patterns without opening the script. This screenshot is from 1.0. The help now carries six examples, including the member server modes and a build profile.
 
 ![Get-Help output showing the build-lab.ps1 synopsis and two examples](images/build_1.jpg)
 
@@ -124,7 +148,8 @@ And one thing requires a tiny bit of your effort. Creating OUs, users, groups, t
 - **Windows PowerShell 5.1.** This targets 5.1, where `Write-EventLog` is the correct API, and refuses to start anywhere else. See [Known Limitations](#known-limitations) if you are thinking about a PowerShell 7 port.
 - **Local Administrator on the host,** to register the `build-lab` Application event log source. That is the only thing that needs it. If registration fails, the script falls back to the built-in `Application` source automatically and keeps going, so an unelevated run works fine. The guest operations authenticate against the guest, not the host.
 - **A Windows Server 2025 ISO.** The DC and every member server are built from it.
-- **The two sibling projects.** `New-VMwareWorkstationVM` and `new-AdDomain` are expected to sit next to this project on disk (`..\New-VMwareWorkstationVM` and `..\new-AdDomain`). If you keep them somewhere else, point at them with `-VmBuilderScriptPath` and `-AdDomainSourcePath`. The domain name the members join comes from `new-AdDomain\include\global-config.ps1`.
+- **The two sibling projects.** `New-VMwareWorkstationVM` and `new-AdDomain` are expected to sit next to this project on disk (`..\New-VMwareWorkstationVM` and `..\new-AdDomain`). If you keep them somewhere else, point at them with `-VmBuilderScriptPath` and `-AdDomainSourcePath`. The domain name comes from `new-AdDomain\include\global-config.ps1`, or from the [build profile](#build-profiles) when you use one.
+- **new-AdDomain 2.0.** That is the release that ships `include\BuildProfile.ps1`, which build-lab 2.1 uses to check the staged copy. Point build-lab at an older copy and it stops before building anything, with a message that says so.
 
 ```text
 Sibling Projects/
@@ -145,6 +170,7 @@ Sibling Projects/
 - **Windows 11 host, VMware Workstation Pro 26H1.** Full build verified end to end, from the VM build through the payload copy to forest promotion. The script's floor is Workstation 17+, which is what the vmrun guest-operations calls need, but 26H1 is what the end-to-end runs have actually been against. You are updating your software, right?
 - **Windows Server 2025 Standard Evaluation (Desktop Experience), `SERVER_EVAL_x64FRE` media.** Built at 8 GB RAM, 4 vCPU, and a 120 GB disk. Other editions and VL or retail media are unverified. The unattended install matches on exact edition name strings, and those differ between evaluation and VL media, so expect to adjust if you switch.
 - **Member servers, same host and Workstation 26H1.** Verified end to end at the default sizes, a 4 GB / 2 vCPU DC with 2 GB / 1 vCPU members. That covered full builds with two members, including two labs building side by side on one host, a DC-only build followed by `-AddMemberServers`, number skipping and reuse, and the move to `OU=Servers`.
+- **Build profiles, with new-AdDomain 2.0.** The 2.1 changes were run on live VMs in all four modes, `-SkipVmBuild` among them against a promoted DC, where stopping is its job. The builds ran with no profile, with a profile at the `WinThreshold` and `Win2025` levels, and with a profile left in the `new-AdDomain` folder that clashes with an existing site and subnet.
 
 ## Quick Start
 
@@ -196,6 +222,18 @@ $pw = ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force
 
 Those are roughly the specs behind the screenshots above. 4 GB and 2 vCPU are the defaults and they do work, but AD DS is happier with more, and the build finishes sooner. `-DeploymentTimeoutMinutes 45` buys headroom on a slow host. Raising it costs nothing when the build succeeds, because the poll exits as soon as `ntds.dit` appears.
 
+### A different forest from a build profile
+
+```powershell
+$pw = ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force
+.\build-lab.ps1 -IsoPath 'C:\ISOs\WS2025.iso' -AdminPassword $pw `
+    -VmStoragePath 'C:\VMs' -VmName 'CORPDC01' -ComputerName 'CORPDC01' `
+    -StaticIpAddress '192.168.220.50' -DefaultGateway '192.168.220.2' `
+    -ProfilePath 'C:\LabProfiles\corp.psd1'
+```
+
+Same build as the Quick Start, but the forest is whatever `corp.psd1` says. Keep your profiles outside both repositories, and each lab's forest settings live in one file you can hand to someone else. [Build Profiles](#build-profiles) has what goes in the file and which profile wins when there is more than one around.
+
 ### A DC with member servers
 
 ```powershell
@@ -217,7 +255,7 @@ $pw = ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force
     -MemberServerCount 1
 ```
 
-`-VmStoragePath` and `-VmName` find the existing DC. `-StaticIpAddress` is the DC's own address, because the members are numbered from it and use it for DNS. Before anything is built, build-lab checks that the VM really is that DC. It looks for `ntds.dit`, the domain from `global-config.ps1`, the address and prefix length you passed, and the gateway if you passed one. Leave `-DefaultGateway` off and the gateway goes unchecked, and the new members get none. The DC itself is never changed. No payload copy, no redeployment.
+`-VmStoragePath` and `-VmName` find the existing DC. `-StaticIpAddress` is the DC's own address, because the members are numbered from it and use it for DNS. Before anything is built, build-lab checks that the VM really is that DC. It looks for `ntds.dit`, the domain from `global-config.ps1` (or the build profile, if the DC was built with one, so pass it again with `-ProfilePath`), the address and prefix length you passed, and the gateway if you passed one. Leave `-DefaultGateway` off and the gateway goes unchecked, and the new members get none. The DC itself is never changed. No payload copy, no redeployment.
 
 Numbering picks up where the lab left off. Names already used by a VM folder, by the DC, or by a computer object in AD are skipped, so this example gets `SRVR-03` in a lab that already has two members.
 
@@ -261,6 +299,50 @@ Member servers are Windows Server 2025 VMs built with the same VM builder as the
 - **Where they land.** In the domain's default `CN=Computers` container. `OU=Servers` is created by directory population, so the move is a separate later step. Log into the DC, let population finish, then run `-MoveMemberServers`. It moves only objects named exactly `SRVR-NN`, refuses to move anything if more match than the cap, re-checks afterwards that none were left behind, and is safe to run again.
 - **How many.** Five per run by default. The cap is `$maxMemberServerCount` in the script's Variables region, because a scope limit is something you should only change on purpose.
 
+## Build Profiles
+
+A build profile is a small `.psd1` file that says which forest to build. Pass it with `-ProfilePath` and build-lab copies it into its staged copy of `new-AdDomain` as `include\build-profile.psd1`, which is where the guest scripts look for it. Neither repository gets touched, so you can keep a folder of profiles and build whichever lab you need today.
+
+```powershell
+@{
+    DomainName      = 'corp.example.test'
+    NetBIOSName     = 'CORP'
+    PrimarySiteName = 'Corp-HQ'
+    PrimarySubnet   = 'Auto'
+}
+```
+
+A key you leave out keeps its `global-config.ps1` value. The full list of keys, what each one accepts, and what happens to an empty or clashing value belong to `new-AdDomain`, so its README is the place to look.
+
+Before anything is built, build-lab reads the staged copy the same way the guest will. A typo, or a key it does not know, stops the run right there with the problem named, and the log points at your file rather than at the temp copy. The guest later runs exactly the files that were checked.
+
+### Which profile a run uses
+
+| `-ProfilePath` | `new-AdDomain\include\build-profile.psd1` exists | The run uses | The log says |
+|---|---|---|---|
+| Not given | No | No profile | INFO `No build profile` |
+| Not given | Yes | That source profile | WARN naming its path and SHA-256 |
+| Given | No | `-ProfilePath` | INFO with its path and SHA-256 |
+| Given | Yes | `-ProfilePath` | WARN that the source profile was replaced, then the INFO |
+
+The second row is the one to watch. A file you never named on the command line decides which forest gets built, and that deserves a WARN. It still builds. If you meant it, pass the same file with `-ProfilePath` and the warning goes away. The SHA-256 in the log is the hash of the copy the guest gets, so you can check it against the file you thought you were using.
+
+### Members and moves need the same profile
+
+`-AddMemberServers` and `-MoveMemberServers` pick the profile by the same rule, so pass the one the DC was built with. They compare its domain with the DC's real one and refuse a mismatch. A wrong profile stops the run instead of building members for the wrong domain.
+
+### A DC built before lab.test
+
+The default domain is now `lab.test`. A DC built with an older `new-AdDomain` is in `lab.local`, and without a profile the add and move runs refuse it. Save these two lines as a profile and pass it to those runs with `-ProfilePath`.
+
+```powershell
+@{ DomainName = 'lab.local'; NetBIOSName = 'LAB' }
+```
+
+### The early address check
+
+In a full build with an explicit `PrimarySubnet` (anything other than `Auto`), build-lab checks that the DC's `-StaticIpAddress` sits inside it before building anything. A miss is a WARN and the build carries on. The guest then uses the DC's own subnet instead, and its "Requested subnet" test row fails, so the miss shows up in the test results and not only in the log. That is the usual sign of a profile copied from another lab. The other three modes skip the check. `-SkipVmBuild` has no address to check, and the add and move modes never run directory population.
+
 ## Parameters
 
 There are four ways to run the script, chosen by switch:
@@ -289,7 +371,8 @@ There are four ways to run the script, chosen by switch:
 | `-DnsServer` | `8.8.8.8` | DNS server for the DC during its build. Members always use the DC instead. |
 | `-TimeoutMinutes` | `90` | Upper bound on each VM build (1 to 1440). |
 | `-VmBuilderScriptPath` | `..\New-VMwareWorkstationVM\New-VMwareWorkstationVM.ps1` | Override if the sibling project is relocated. |
-| `-AdDomainSourcePath` | `..\new-AdDomain` | Override if the sibling project is relocated. |
+| `-AdDomainSourcePath` | `..\new-AdDomain` | Override if the sibling project is relocated. It needs build profile support (`include\BuildProfile.ps1`). |
+| `-ProfilePath` | none | A build profile (`.psd1`) for this run, in all four modes. Must name an existing `.psd1` file. See [Build Profiles](#build-profiles). |
 | `-GuestReadyTimeoutMinutes` | `20` | How long to wait for a guest to answer guest operations, and for the DC's promotion reboot after `ntds.dit` appears (1 to 120). |
 | `-DeploymentTimeoutMinutes` | `30` | How long to poll for `ntds.dit` before failing (1 to 240). Raise it if the guest is slow or heavily loaded. |
 | `-MemberServerCount` | `0` | Member servers to build and join. Capped at 5 per run by `$maxMemberServerCount`. |
@@ -396,7 +479,11 @@ This is a lab tool and it makes trades a production tool has no business making.
 
 **"... is already a promoted domain controller ..., so -SkipVmBuild stopped before changing it"** -- Working as designed. `-SkipVmBuild` is for a VM whose deployment has not happened or failed early. Use `-AddMemberServers` or `-MoveMemberServers` against a working DC.
 
-**"No member servers were built: the DC at ... does not match this run"** -- `-AddMemberServers` checked the existing DC and something did not line up. The message says what the DC actually reports. Pass its real `-StaticIpAddress`, `-SubnetMask` and `-DefaultGateway`, and check the domain in `new-AdDomain\include\global-config.ps1`.
+**"No member servers were built: the DC at ... does not match this run"** -- `-AddMemberServers` checked the existing DC and something did not line up. The message says what the DC actually reports. Pass its real `-StaticIpAddress`, `-SubnetMask` and `-DefaultGateway`, and check the domain in `new-AdDomain\include\global-config.ps1`. If the DC was built from a build profile, pass the same one with `-ProfilePath`. The message names the file the expected domain came from.
+
+**"The build configuration is not valid, so build-lab stopped before any VM was built or changed"** -- The build profile or `global-config.ps1` holds something the build cannot use. The ERROR lines just above it name each problem, and each one starts with the file it came from. Fix those and run again. Nothing was built, so there is nothing to clean up.
+
+**"... is a new-AdDomain without build profile support"** -- `-AdDomainSourcePath` (or the sibling folder) holds an older `new-AdDomain` without `include\BuildProfile.ps1`. Update it.
 
 **"Domain membership not confirmed within N minute(s)"** -- A member joined but did not finish its reboot in time, or came back without reporting the domain. Check its console. Raise `-DomainJoinTimeoutMinutes` if the host is just slow. The rest of the members still ran, and the summary says which ones failed.
 
