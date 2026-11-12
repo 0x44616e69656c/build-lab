@@ -1,13 +1,7 @@
-/junk
+# What your runs create in this folder. None of it belongs in a commit.
+
+# Your override file. When one is already there, Export-OverrideFile.ps1 writes its new file in a migrated folder under this one.
+/overrides/
+
+# The run logs, the VM builder's logs and transcripts, and the guest deployment logs pulled back from each DC.
 /logs
-/artifacts
-/reviews
-/tests
-.gitignore-publish
-journal.md
-updates.md
-changes.md
-AD_Deployment_Consolidated_Plan.md
-todo.md
-plan.md
-/images/Logos/Template images

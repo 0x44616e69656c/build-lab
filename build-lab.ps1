@@ -90,8 +90,8 @@
         (-MoveMemberServers, below).
     A member that fails is logged and the rest continue. The run then prints a summary
     and throws: exit code 1 under powershell.exe -File, or a terminating error raised to
-    the caller when invoked in a session. The cap on -MemberServerCount is
-    $maxMemberServerCount in the Variables region.
+    the caller when invoked in a session. The cap on -MemberServerCount is the
+    MaxMemberServerCount setting, 5 unless the override file changes it.
 
     -AddMemberServers builds and joins members against an EXISTING DC without touching
     it: no payload copy, no deployment relaunch. It checks that the DC answers guest
@@ -112,8 +112,28 @@
     need the build profile the DC was built with, chosen by the same rule as a build, or
     the domain check refuses the DC. It fails with a clear message if
     OU=Servers does not exist yet, and moves nothing if more objects match than
-    $maxMemberServerCount. Re-running it is harmless: objects already in OU=Servers are
+    MaxMemberServerCount. Re-running it is harmless: objects already in OU=Servers are
     reported and left alone.
+
+    Settings you keep from run to run go in overrides\overrides.psd1 in this script's
+    folder, which git ignores and no upgrade touches. It can change the default of every
+    parameter OVERRIDE.md lists, and the MaxMemberServerCount and EnableEventLogging
+    settings. A value on the command line wins over the file. With no file, one INFO
+    line says so and the shipped values apply. The file is read before anything else,
+    and a problem in it stops the run, logged, before any VM is built or changed.
+
+    The two sibling projects are checked before anything is built. new-AdDomain's
+    New-ADForestDeployment.ps1 and New-VMwareWorkstationVM.ps1 are read for their header
+    Version by parsing, never by running them. An older new-AdDomain stops the run. An
+    older New-VMwareWorkstationVM is a WARN, and stops the run only when it has an
+    override file it would ignore. The staged new-AdDomain's global-config.ps1 must be at
+    least the version its scripts need, which catches an older copy put back over a newer
+    one.
+
+    -AddMemberServers and -MoveMemberServers against a DC in another domain stop, unless
+    nothing named a domain at all: no build profile, no new-AdDomain override file and
+    an unedited global-config.ps1. Then the DC's own domain is used, read from the DC
+    with Get-ADDomain, with a WARN.
 .PARAMETER IsoPath
     Windows Server 2025 installation ISO. Required for a full build and for
     -AddMemberServers (members are built from it).
@@ -169,8 +189,8 @@
 .PARAMETER DeploymentTimeoutMinutes
     How long to poll for ntds.dit after launching the forest deployment. Default 30.
 .PARAMETER MemberServerCount
-    Number of member servers to build and join. Default 0. Capped by
-    $maxMemberServerCount in the Variables region.
+    Number of member servers to build and join. Default 0. Capped by the
+    MaxMemberServerCount setting (OVERRIDE.md).
 .PARAMETER MemberRamMB
     Member memory in MB. Default 2048.
 .PARAMETER MemberCpuCount
@@ -243,18 +263,20 @@
     logs\guest-<timestamp>\. A failure ends in a terminating error (exit code 1 under
     powershell.exe -File).
 .NOTES
-    Version:      2.1.0
+    Version:      2.2.0
     Author:       Daniel Owen
-    Release Date: 2026-11-05
+    Release Date: 2026-11-12
     Requirements: VMware Workstation 17+ (vmrun.exe), Windows PowerShell 5.1 (Desktop
                   edition, enforced by #Requires), local
                   Administrator on the host for Application event log source
                   registration only (vmrun guest operations authenticate against the
                   guest, not the host, and an unelevated run falls back to the built-in
                   'Application' source). Windows Server 2025 ISO. Sibling
-                  projects New-VMwareWorkstationVM and new-AdDomain present relative to
-                  this script (override with -VmBuilderScriptPath / -AdDomainSourcePath
-                  if relocated). Guest credentials are Administrator / -AdminPassword;
+                  projects new-AdDomain 2.1.0 or later and New-VMwareWorkstationVM
+                  1.1.0 or later present relative to this script (override with
+                  -VmBuilderScriptPath / -AdDomainSourcePath if relocated). Shared
+                  copies in include\, OverrideFile.ps1 among them, and
+                  include\override-catalog.psd1. Guest credentials are Administrator / -AdminPassword;
                   the plaintext password unavoidably appears in vmrun's -gp argument
                   (visible in the host process list) -- accepted for lab use. Passwords
                   containing a double-quote character are rejected because they break
@@ -343,7 +365,8 @@ param (
 
     # --- Member servers ---
     # Upper bound here only keeps the SRVR-NN two-digit naming valid. The working cap is
-    # $maxMemberServerCount in the Variables region, checked before anything is built.
+    # $maxMemberServerCount (the MaxMemberServerCount setting), checked before anything
+    # is built.
     [ValidateRange(0, 99)]
     [int]$MemberServerCount = 0,
 
@@ -378,7 +401,7 @@ param (
 
 #region Include
 $includeRootPath = Join-Path -Path $PSScriptRoot -ChildPath 'include'
-foreach ($includeFileName in @('Sanitization.ps1', 'Logging.ps1', 'EventLogging.ps1', 'Retry.ps1', 'FileUtilities.ps1')) {
+foreach ($includeFileName in @('Sanitization.ps1', 'Logging.ps1', 'EventLogging.ps1', 'Retry.ps1', 'FileUtilities.ps1', 'OverrideFile.ps1')) {
     $includeFilePath = Join-Path -Path $includeRootPath -ChildPath $includeFileName
     if (-not (Test-Path -LiteralPath $includeFilePath -PathType Leaf)) {
         throw "Required include file not found: $includeFilePath"
@@ -1356,20 +1379,31 @@ function Get-AdDomainIdentity {
     # check behave like the guest's. Any output the file writes is discarded, so it cannot
     # turn the return value into an array.
     #
-    # Checks, in order: a build profile error (returned for the caller to log, ahead of the
-    # check below, which it would otherwise mask, because the derived values are not set
-    # after an error), a new-AdDomain without build profile support (throws), the identity
-    # values (throws), then the service account SPN placeholders on the staged CSV.
+    # Checks, in order: with -RequiredGlobalConfigVersion, the file's $globalConfigVersion
+    # (throws, because an older global-config.ps1 explains every check below it), a build
+    # profile or override file error (returned for the caller to log, ahead of the check
+    # below, which it would otherwise mask, because the derived values are not set after
+    # an error), a new-AdDomain without build profile support (throws), the identity
+    # values (throws), then the service account SPN checks on the CSV the guest will read:
+    # the override file's replacement serviceaccounts.csv when there is one, otherwise
+    # config\serviceaccounts.csv.
     #
-    # Returns { DomainName; NetBIOSName; DomainDN; ServersOU; PrimarySubnet; Summary; Info;
-    # Warnings; Error; PlaceholderRows }. Info, Warnings and PlaceholderRows are arrays.
-    # Error is $null or the error text, which may hold several lines.
+    # Returns { DomainName; NetBIOSName; DomainDN; ServersOU; PrimarySubnet;
+    # DomainNameSource; GlobalConfigVersion; Summary; Info; Warnings; Error; PairWarnings;
+    # PairError; ServiceAccountCsvPath; PlaceholderRows; OtherDomainRows }. Info, Warnings,
+    # PairWarnings and both row lists are arrays. Error and PairError are $null or the
+    # error text, which may hold several lines. DomainNameSource is new-AdDomain's
+    # (Profile, OverrideFile, GlobalConfigEdited or Shipped), returned as data because the
+    # BuildProfile.ps1 function that worked it out is gone once this function returns.
     param (
         [Parameter(Mandatory)]
         [string]$GlobalConfigPath,
         # The source new-AdDomain, named when it has no build profile support. Default:
         # the folder two levels above -GlobalConfigPath.
-        [string]$AdDomainSourcePath
+        [string]$AdDomainSourcePath,
+        # The oldest $globalConfigVersion new-AdDomain's scripts run with
+        # (Get-RequiredGlobalConfigVersion). Not checked when it is not given.
+        [string]$RequiredGlobalConfigVersion
     )
     if (-not (Test-Path -LiteralPath $GlobalConfigPath -PathType Leaf)) {
         throw "Domain configuration not found at '$GlobalConfigPath'. Member servers take the domain name from new-AdDomain\include\global-config.ps1. Pass -AdDomainSourcePath if new-AdDomain is not a sibling of this project."
@@ -1379,29 +1413,48 @@ function Get-AdDomainIdentity {
     }
 
     $ErrorActionPreference = 'Stop'
-    $domainName           = $null
-    $netBIOSName          = $null
-    $domainDN             = $null
-    $serversOU            = $null
-    $primarySubnet        = $null
-    $csvPath              = $null
-    $buildProfileSummary  = $null
-    $buildProfileInfo     = $null
-    $buildProfileWarnings = $null
-    $buildProfileError    = $null
+    $domainName               = $null
+    $netBIOSName              = $null
+    $domainDN                 = $null
+    $serversOU                = $null
+    $primarySubnet            = $null
+    $csvPath                  = $null
+    $globalConfigVersion      = $null
+    $buildProfileSummary      = $null
+    $buildProfileInfo         = $null
+    $buildProfileWarnings     = $null
+    $buildProfileError        = $null
+    $buildProfileDomainSource = $null
+    $overrideFileCsvPaths     = $null
+    $overrideFilePairWarnings = $null
+    $overrideFilePairError    = $null
     $null = . $GlobalConfigPath
 
+    if ($RequiredGlobalConfigVersion) {
+        $globalConfigVersionStop = Test-GlobalConfigVersionRequirement -FoundVersion $globalConfigVersion -RequiredVersion $RequiredGlobalConfigVersion `
+            -GlobalConfigPath (Join-Path -Path $AdDomainSourcePath -ChildPath 'include\global-config.ps1')
+        if ($globalConfigVersionStop) {
+            throw $globalConfigVersionStop
+        }
+    }
+
     $domainIdentity = [pscustomobject]@{
-        DomainName      = $domainName
-        NetBIOSName     = $netBIOSName
-        DomainDN        = $domainDN
-        ServersOU       = $serversOU
-        PrimarySubnet   = $primarySubnet
-        Summary         = $buildProfileSummary
-        Info            = @($buildProfileInfo | Where-Object { $null -ne $_ })
-        Warnings        = @($buildProfileWarnings | Where-Object { $null -ne $_ })
-        Error           = $(if ($buildProfileError) { [string]$buildProfileError } else { $null })
-        PlaceholderRows = @()
+        DomainName            = $domainName
+        NetBIOSName           = $netBIOSName
+        DomainDN              = $domainDN
+        ServersOU             = $serversOU
+        PrimarySubnet         = $primarySubnet
+        DomainNameSource      = $(if ($buildProfileDomainSource) { [string]$buildProfileDomainSource } else { $null })
+        GlobalConfigVersion   = $(if ($globalConfigVersion) { [string]$globalConfigVersion } else { $null })
+        Summary               = $buildProfileSummary
+        Info                  = @($buildProfileInfo | Where-Object { $null -ne $_ })
+        Warnings              = @($buildProfileWarnings | Where-Object { $null -ne $_ })
+        Error                 = $(if ($buildProfileError) { [string]$buildProfileError } else { $null })
+        PairWarnings          = @($overrideFilePairWarnings | Where-Object { $null -ne $_ })
+        PairError             = $(if ($overrideFilePairError) { [string]$overrideFilePairError } else { $null })
+        ServiceAccountCsvPath = $null
+        PlaceholderRows       = @()
+        OtherDomainRows       = @()
     }
     if ($domainIdentity.Error) {
         return $domainIdentity
@@ -1413,7 +1466,14 @@ function Get-AdDomainIdentity {
         throw "'$GlobalConfigPath' did not define all of `$domainName, `$netBIOSName, `$domainDN, `$serversOU and `$csvPath. Check the Domain Identity, OU Structure and File Paths regions of that file."
     }
     $serviceAccountCsvPath = Join-Path -Path $csvPath -ChildPath 'serviceaccounts.csv'
+    if ($overrideFileCsvPaths -is [System.Collections.IDictionary] -and $overrideFileCsvPaths.Contains('serviceaccounts.csv')) {
+        $serviceAccountCsvPath = [string]$overrideFileCsvPaths['serviceaccounts.csv']
+    }
+    $domainIdentity.ServiceAccountCsvPath = $serviceAccountCsvPath
     $domainIdentity.PlaceholderRows = @(Test-ServicePrincipalNamePlaceholder -CsvPath $serviceAccountCsvPath -DomainName $domainName | Where-Object { $null -ne $_ })
+    if (Get-Command -Name 'Test-ServicePrincipalNameDomain' -CommandType Function -ErrorAction SilentlyContinue) {
+        $domainIdentity.OtherDomainRows = @(Test-ServicePrincipalNameDomain -CsvPath $serviceAccountCsvPath -DomainName $domainName | Where-Object { $null -ne $_ })
+    }
     return $domainIdentity
 }
 
@@ -1658,7 +1718,11 @@ function Get-GuestDomainControllerIdentity {
     # Reads, from the DC itself, what -AddMemberServers and -MoveMemberServers otherwise
     # take on trust from the command line and global-config.ps1: its computer name, its
     # domain, its domain role, its IPv4 addresses with prefix lengths, and its default
-    # gateways.
+    # gateways. It also reads the domain with Get-ADDomain -Current LocalComputer, for its
+    # DNSRoot, NetBIOSName and DistinguishedName (AdDomainDnsRoot, AdDomainNetBIOSName,
+    # AdDomainDistinguishedName), which Resolve-MemberDomainIdentity uses when nothing
+    # named a domain. On a guest where that read fails, such as one that is not a DC,
+    # those three are $null and the rest of the answer is unchanged.
     param (
         [Parameter(Mandatory)]
         [string]$VmrunPath,
@@ -1672,7 +1736,10 @@ function Get-GuestDomainControllerIdentity {
     $guestCommand = '$computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem; ' +
         '$ipv4Addresses = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -ne ''127.0.0.1'' -and $_.PrefixOrigin -ne ''WellKnown'' } | ForEach-Object { ''{0}/{1}'' -f $_.IPAddress, $_.PrefixLength }); ' +
         '$defaultGateways = @(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix ''0.0.0.0/0'' -ErrorAction SilentlyContinue | ForEach-Object { $_.NextHop }); ' +
-        '[pscustomobject]@{ Name = $computerSystem.Name; Domain = $computerSystem.Domain; DomainRole = $computerSystem.DomainRole; Ipv4Addresses = $ipv4Addresses; DefaultGateways = $defaultGateways }'
+        '$adDomain = $null; try { Import-Module -Name ActiveDirectory -ErrorAction Stop; $adDomain = Get-ADDomain -Current LocalComputer -ErrorAction Stop } catch { $adDomain = $null }; ' +
+        '[pscustomobject]@{ Name = $computerSystem.Name; Domain = $computerSystem.Domain; DomainRole = $computerSystem.DomainRole; Ipv4Addresses = $ipv4Addresses; DefaultGateways = $defaultGateways; ' +
+        'AdDomainDnsRoot = $(if ($adDomain) { [string]$adDomain.DNSRoot } else { $null }); AdDomainNetBIOSName = $(if ($adDomain) { [string]$adDomain.NetBIOSName } else { $null }); ' +
+        'AdDomainDistinguishedName = $(if ($adDomain) { [string]$adDomain.DistinguishedName } else { $null }) }'
 
     return Invoke-GuestPowerShellCommand -VmrunPath $VmrunPath -VmxFilePath $VmxFilePath -GuestCredential $GuestCredential `
         -OperationName 'query DC identity' -GuestCommand $guestCommand -HostStagingPath $HostStagingPath -Retry
@@ -2314,17 +2381,277 @@ function Show-PostBuildManualStepNotice {
     }
 }
 
+function Get-ScriptHeaderVersion {
+    # Returns the Version line of a script's comment-based header, as written, read by
+    # parsing the script (Read-ScriptSetting, include\OverrideFile.ps1), never by running
+    # it. $null when the script is missing, can't be parsed or has no Version line.
+    param (
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+    $scriptSetting = Read-ScriptSetting -Path $Path
+    if ($scriptSetting.Error) {
+        return $null
+    }
+    return $scriptSetting.Version
+}
+
+function Test-SiblingVersion {
+    # Compares a sibling script's header version with the oldest one this build-lab works
+    # with, as [version], so a newer version (an unreleased master included) passes.
+    # Returns { Status; FoundVersion; Message }, where Status is Ok, Below or Unreadable.
+    param (
+        [Parameter(Mandatory)]
+        [string]$ProjectName,
+        [Parameter(Mandatory)]
+        [string]$ScriptPath,
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$FoundVersion,
+        [Parameter(Mandatory)]
+        [string]$MinimumVersion
+    )
+    $parsedVersion = $null
+    if ($FoundVersion) {
+        $parsedVersion = $FoundVersion -as [version]
+    }
+    if ($null -eq $parsedVersion) {
+        return [pscustomobject]@{ Status = 'Unreadable'; FoundVersion = $FoundVersion
+            Message = "$ProjectName's version can't be read from the header of '$ScriptPath', so build-lab can't tell whether it is $MinimumVersion or later, as this build-lab needs." }
+    }
+    if ($parsedVersion -lt [version]$MinimumVersion) {
+        return [pscustomobject]@{ Status = 'Below'; FoundVersion = $FoundVersion
+            Message = "$ProjectName at '$ScriptPath' is version $FoundVersion, and this build-lab needs $MinimumVersion or later." }
+    }
+    return [pscustomobject]@{ Status = 'Ok'; FoundVersion = $FoundVersion
+        Message = "$ProjectName at '$ScriptPath' is version $FoundVersion. This build-lab needs $MinimumVersion or later." }
+}
+
+function Get-RequiredGlobalConfigVersion {
+    # The oldest include\global-config.ps1 the given new-AdDomain scripts run with: the
+    # highest of their $requiredGlobalConfigVersion constants, read by parsing each script
+    # (Read-ScriptSetting), never by running it. Returns { Version; Problems }. Version is
+    # $null when no script states one, and Problems names each script that doesn't.
+    param (
+        [Parameter(Mandatory)]
+        [string[]]$ScriptPath
+    )
+    $highestVersion     = $null
+    $highestVersionText = $null
+    $problems           = @()
+    foreach ($onePath in $ScriptPath) {
+        $scriptSetting = Read-ScriptSetting -Path $onePath
+        if ($scriptSetting.Error) {
+            $problems += $scriptSetting.Error
+            continue
+        }
+        $requiredAssignment = @($scriptSetting.Assignments | Where-Object { $_.Name -eq 'requiredGlobalConfigVersion' }) | Select-Object -Last 1
+        $requiredVersion = $null
+        if ($null -ne $requiredAssignment -and $requiredAssignment.State -eq 'Value') {
+            $requiredVersion = [string]$requiredAssignment.Value -as [version]
+        }
+        if ($null -eq $requiredVersion) {
+            $problems += "'$onePath' has no constant `$requiredGlobalConfigVersion."
+            continue
+        }
+        if ($null -eq $highestVersion -or $requiredVersion -gt $highestVersion) {
+            $highestVersion     = $requiredVersion
+            $highestVersionText = [string]$requiredAssignment.Value
+        }
+    }
+    return [pscustomobject]@{ Version = $highestVersionText; Problems = $problems }
+}
+
+function Test-GlobalConfigVersionRequirement {
+    # Returns $null when global-config.ps1's $globalConfigVersion is at least the version
+    # new-AdDomain's scripts need, compared as [version], and otherwise the stop text,
+    # which names both versions and an older global-config.ps1 as the likely cause. A
+    # global-config.ps1 from before override files has no $globalConfigVersion at all.
+    param (
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$FoundVersion,
+        [Parameter(Mandatory)]
+        [string]$RequiredVersion,
+        [Parameter(Mandatory)]
+        [string]$GlobalConfigPath
+    )
+    $parsedVersion = $null
+    if ($FoundVersion) {
+        $parsedVersion = $FoundVersion -as [version]
+    }
+    if ($null -ne $parsedVersion -and $parsedVersion -ge [version]$RequiredVersion) {
+        return $null
+    }
+    $foundText = if (-not $FoundVersion) { 'has no version, so it comes from an older release' }
+        elseif ($null -eq $parsedVersion) { "has the version '$FoundVersion', which isn't a version number" }
+        else { "is version $FoundVersion" }
+    return "new-AdDomain's scripts need include\global-config.ps1 $RequiredVersion or later, and '$GlobalConfigPath' $foundText. An older global-config.ps1 was probably copied over this release's, so build-lab stopped before any VM was built or changed. Put back this release's include\global-config.ps1 and keep your settings in new-AdDomain's overrides\overrides.psd1. new-AdDomain's UPGRADE.md shows how to move them there with Export-OverrideFile.ps1."
+}
+
+function Resolve-MemberDomainIdentity {
+    # Decides which domain -AddMemberServers and -MoveMemberServers work in, once the DC
+    # has been read. When the staged domain came from nothing anyone named
+    # (DomainNameSource 'Shipped': no build profile, no new-AdDomain override file and an
+    # unedited global-config.ps1) and the DC is in another domain, the DC's own domain is
+    # used, with a WARN. Its DNS name, NetBIOS name and distinguished name come from
+    # Get-ADDomain on the DC (Get-GuestDomainControllerIdentity), so nothing is derived
+    # here and no new-AdDomain function is called. A domain that was named keeps the DC
+    # check's stop (Compare-DomainControllerIdentity).
+    # Returns { Identity; Warning }: Identity is the staged identity, or a copy holding the
+    # DC's DomainName, NetBIOSName, DomainDN and ServersOU. Warning is $null or the WARN.
+    param (
+        [Parameter(Mandatory)]
+        [object]$StagedIdentity,
+        [Parameter(Mandatory)]
+        [object]$DomainControllerIdentity,
+        [Parameter(Mandatory)]
+        [string]$VmxFilePath
+    )
+    $result = [pscustomobject]@{ Identity = $StagedIdentity; Warning = $null }
+    # -eq on strings ignores case, as DNS names do.
+    if ([string]$DomainControllerIdentity.Domain -eq [string]$StagedIdentity.DomainName) {
+        return $result
+    }
+    $stagedSourceProperty = $StagedIdentity.PSObject.Properties['DomainNameSource']
+    if ($null -eq $stagedSourceProperty -or $stagedSourceProperty.Value -ne 'Shipped') {
+        return $result
+    }
+    $domainControllerValues = @{}
+    foreach ($propertyName in @('AdDomainDnsRoot', 'AdDomainNetBIOSName', 'AdDomainDistinguishedName')) {
+        $domainControllerProperty = $DomainControllerIdentity.PSObject.Properties[$propertyName]
+        $domainControllerValues[$propertyName] = $(if ($null -ne $domainControllerProperty) { [string]$domainControllerProperty.Value } else { '' })
+    }
+    if (-not $domainControllerValues['AdDomainDnsRoot'] -or -not $domainControllerValues['AdDomainNetBIOSName'] -or -not $domainControllerValues['AdDomainDistinguishedName']) {
+        $result.Warning = "The DC at '$VmxFilePath' reports domain '$($DomainControllerIdentity.Domain)', and nothing named a domain for this run, but Get-ADDomain on the DC gave no domain, so its domain can't be used in place of the shipped '$($StagedIdentity.DomainName)'."
+        return $result
+    }
+    $effectiveIdentity = $StagedIdentity.PSObject.Copy()
+    $effectiveIdentity.DomainName  = $domainControllerValues['AdDomainDnsRoot']
+    $effectiveIdentity.NetBIOSName = $domainControllerValues['AdDomainNetBIOSName']
+    $effectiveIdentity.DomainDN    = $domainControllerValues['AdDomainDistinguishedName']
+    $effectiveIdentity.ServersOU   = "OU=Servers,$($domainControllerValues['AdDomainDistinguishedName'])"
+    $result.Identity = $effectiveIdentity
+    $result.Warning  = "The DC at '$VmxFilePath' is in '$($effectiveIdentity.DomainName)' (NetBIOS $($effectiveIdentity.NetBIOSName)), and no build profile, new-AdDomain override file or edited global-config.ps1 names a domain, so the shipped '$($StagedIdentity.DomainName)' would apply. This run uses the DC's domain instead. To name it, set DomainName and NetBIOSName in new-AdDomain's overrides\overrides.psd1."
+    return $result
+}
+
 #endregion Functions
 
 #region Variables
+# The region runs in this order, so nothing below the override file resets a value it set:
+# the base constants, the override file, the sibling path defaults, then the derived paths.
+
 # Printed in the starting log line so every log shows which version ran. Keep it in step
 # with Version in .NOTES.
-$scriptVersion      = '2.1.0'
+$scriptVersion      = '2.2.0'
 $enableEventLogging = $true
 $eventLogSourceName = 'build-lab'
 $guestUserName      = 'Administrator'
 $runTimestamp       = Get-Date -Format 'yyyyMMdd_HHmmss'
 
+# Member servers. The cap is a scope limit on -MemberServerCount. The override file's
+# MaxMemberServerCount changes it, so it is never a per-run value.
+$maxMemberServerCount   = 5
+$memberServerNamePrefix = 'SRVR-'
+$memberServerIpOffset   = 10
+# Matches exactly the names this script gives members (SRVR-01..SRVR-99), so
+# -MoveMemberServers cannot pick up population's SRV-<seed>-<n> objects or anything else.
+$memberServerNamePattern = '^' + [regex]::Escape($memberServerNamePrefix) + '\d{2}$'
+
+# The oldest sibling releases this build-lab works with: the new-AdDomain
+# (New-ADForestDeployment.ps1) and New-VMwareWorkstationVM releases that ship with this
+# one, so a stop names a version a user can download. Each is compared with the
+# sibling's header Version as [version], so a newer sibling passes.
+$minimumAdDomainVersion  = '2.1.0'
+$minimumVmBuilderVersion = '1.1.0'
+
+#region Override file
+# overrides\overrides.psd1 holds the user's standing settings, so an upgrade never touches
+# them (OVERRIDE.md lists every key). Logging hasn't started yet, so every line is held
+# here and logged right after the starting line, and a stop is held the same way and
+# thrown there. The assignments run here, at script level, so each parameter's own
+# validation attributes check the value. Inside a function they would set a local copy.
+# A parameter the command line bound keeps its value.
+$overrideFilePath     = Join-Path -Path $PSScriptRoot -ChildPath 'overrides\overrides.psd1'
+$overrideCatalogPath  = Join-Path -Path $PSScriptRoot -ChildPath 'include\override-catalog.psd1'
+$overrideInfoLines    = New-Object -TypeName 'System.Collections.Generic.List[string]'
+$overrideWarningLines = New-Object -TypeName 'System.Collections.Generic.List[string]'
+$overrideStopLines    = New-Object -TypeName 'System.Collections.Generic.List[string]'
+$overrideFile = Get-OverrideFile -Path $overrideFilePath -CatalogPath $overrideCatalogPath
+foreach ($overrideLine in $overrideFile.Info) { $overrideInfoLines.Add($overrideLine) }
+foreach ($overrideLine in $overrideFile.Warnings) { $overrideWarningLines.Add($overrideLine) }
+if ($overrideFile.Error) {
+    foreach ($overrideLine in ($overrideFile.Error -split '\r?\n')) { $overrideStopLines.Add($overrideLine) }
+}
+else {
+    $overrideAssignmentResult = Get-OverrideParameterAssignment -OverrideFile $overrideFile -CatalogPath $overrideCatalogPath -BoundParameters $PSBoundParameters
+    foreach ($overrideLine in $overrideAssignmentResult.Info) { $overrideInfoLines.Add($overrideLine) }
+    foreach ($overrideLine in $overrideAssignmentResult.Warnings) { $overrideWarningLines.Add($overrideLine) }
+    if ($overrideAssignmentResult.Error) {
+        foreach ($overrideLine in ($overrideAssignmentResult.Error -split '\r?\n')) { $overrideStopLines.Add($overrideLine) }
+    }
+    else {
+        foreach ($overrideAssignment in $overrideAssignmentResult.Assignments) {
+            $overrideAssignmentValue = $overrideAssignment.Value
+            # A relative sibling path from the file means build-lab's folder, not wherever
+            # the run was started from.
+            if ($overrideAssignment.ParameterName -in @('VmBuilderScriptPath', 'AdDomainSourcePath') -and $overrideAssignmentValue -is [string]) {
+                $overridePathIsRooted = $true
+                try { $overridePathIsRooted = [System.IO.Path]::IsPathRooted($overrideAssignmentValue) } catch { $overridePathIsRooted = $true }
+                if (-not $overridePathIsRooted) { $overrideAssignmentValue = Join-Path -Path $PSScriptRoot -ChildPath $overrideAssignmentValue }
+            }
+            try {
+                Set-Variable -Name $overrideAssignment.ParameterName -Value $overrideAssignmentValue -ErrorAction Stop
+            }
+            catch {
+                # The refusal's own text quotes the value, so it isn't used.
+                $overrideStopLines.Add("Override file '$overrideFilePath': -$($overrideAssignment.ParameterName) doesn't accept the value of $($overrideAssignment.Key). OVERRIDE.md lists the values it accepts.")
+            }
+        }
+        # The two constant keys. Each assignment sits inside an if, so the plain assignment
+        # above stays the one the offline checks and the migration script read.
+        if ($overrideFile.Values.ContainsKey('EnableEventLogging')) { $enableEventLogging = [bool]$overrideFile.Values['EnableEventLogging'] }
+        if ($overrideFile.Values.ContainsKey('MaxMemberServerCount')) { $maxMemberServerCount = [int]$overrideFile.Values['MaxMemberServerCount'] }
+    }
+}
+
+# A shipped default that changed since the previous release gets one INFO line, unless
+# this run set that key on the command line or in the override file. build-lab's keys
+# take no value from a build profile. Nothing here stops the run, and a problem is a WARN.
+$overrideReleaseTablePath = Join-Path -Path $PSScriptRoot -ChildPath 'include\release-values.psd1'
+if ($overrideStopLines.Count -eq 0) {
+    try {
+        $changedCatalogData = Import-PowerShellDataFile -LiteralPath $overrideCatalogPath -ErrorAction Stop
+        $changedReleaseTable = $null
+        if (Test-Path -LiteralPath $overrideReleaseTablePath -PathType Leaf) {
+            $changedReleaseTable = Import-PowerShellDataFile -LiteralPath $overrideReleaseTablePath -ErrorAction Stop
+        }
+        $changedSetKeys = New-Object -TypeName 'System.Collections.Generic.List[string]'
+        foreach ($changedSetKey in @($overrideFile.Values.get_Keys())) { $changedSetKeys.Add([string]$changedSetKey) }
+        $boundParameterNames = @($PSBoundParameters.get_Keys())
+        foreach ($changedCatalogKey in @($changedCatalogData['Settings'].get_Keys())) {
+            $changedCatalogEntry = $changedCatalogData['Settings'][$changedCatalogKey]
+            if ($changedCatalogEntry['Target'] -ceq 'Parameter' -and $boundParameterNames -contains $changedCatalogEntry['Name']) { $changedSetKeys.Add([string]$changedCatalogKey) }
+        }
+        $changedDefaultResult = Get-OverrideChangedDefault -Catalog $changedCatalogData -ReleaseTable $changedReleaseTable -CurrentVersion $scriptVersion -SetKey ([string[]]$changedSetKeys.ToArray())
+        foreach ($changedLine in @($changedDefaultResult.Info)) { if ($changedLine) { $overrideInfoLines.Add($changedLine) } }
+        foreach ($changedLine in @($changedDefaultResult.Warnings)) { if ($changedLine) { $overrideWarningLines.Add($changedLine) } }
+        if ($changedDefaultResult.Error) {
+            foreach ($changedLine in ($changedDefaultResult.Error -split '\r?\n')) { if ($changedLine) { $overrideWarningLines.Add($changedLine) } }
+        }
+    }
+    catch {
+        $overrideWarningLines.Add("Changed default: the override catalog or the release table couldn't be read ($($_.Exception.GetType().FullName)), so changed defaults aren't reported for this run.")
+    }
+}
+#endregion Override file
+
+# The sibling path defaults fill only a path neither the command line nor the override
+# file gave.
 if (-not $VmBuilderScriptPath) {
     $VmBuilderScriptPath = Join-Path -Path $PSScriptRoot -ChildPath '..\New-VMwareWorkstationVM\New-VMwareWorkstationVM.ps1'
 }
@@ -2332,15 +2659,6 @@ if (-not $AdDomainSourcePath) {
     $AdDomainSourcePath = Join-Path -Path $PSScriptRoot -ChildPath '..\new-AdDomain'
 }
 $adDomainGlobalConfigPath = Join-Path -Path $AdDomainSourcePath -ChildPath 'include\global-config.ps1'
-
-# Member servers. The cap is a scope limit on -MemberServerCount, changed by editing it
-# here rather than per run.
-$maxMemberServerCount   = 5
-$memberServerNamePrefix = 'SRVR-'
-$memberServerIpOffset   = 10
-# Matches exactly the names this script gives members (SRVR-01..SRVR-99), so
-# -MoveMemberServers cannot pick up population's SRV-<seed>-<n> objects or anything else.
-$memberServerNamePattern = '^' + [regex]::Escape($memberServerNamePrefix) + '\d{2}$'
 
 $logDirectoryPath = Join-Path -Path $PSScriptRoot -ChildPath 'logs'
 $csvLogFilePath   = Join-Path -Path $logDirectoryPath -ChildPath "build-lab-errors_$runTimestamp.csv"
@@ -2365,6 +2683,21 @@ $guestPasswordPlainText = $null
 try {
     Write-Log "=== build-lab.ps1 $scriptVersion starting ===" -Level INFO
     Write-AppEvent -Enabled $enableEventLogging -SourceName $eventLogSourceName -EntryType Information -EventId 1000 -Message 'build-lab.ps1 started.'
+
+    # The override file's lines, held since the Variables region. A stop comes before
+    # anything is checked, staged, built or changed.
+    foreach ($overrideLine in $overrideInfoLines) {
+        Write-Log $overrideLine -Level INFO
+    }
+    foreach ($overrideLine in $overrideWarningLines) {
+        Write-Log $overrideLine -Level WARN
+    }
+    if ($overrideStopLines.Count -gt 0) {
+        foreach ($overrideLine in $overrideStopLines) {
+            Write-Log $overrideLine -Level ERROR
+        }
+        throw "The override file '$overrideFilePath' can't be applied, so build-lab stopped before any VM was built or changed. $($overrideStopLines -join ' ')"
+    }
 
     # CIDR prefix length derived from the subnet mask, passed to the guest deployment so it
     # can repair a DHCP fallback non-interactively (see Invoke-GuestAdForestDeployment).
@@ -2454,33 +2787,88 @@ try {
         Write-Log $buildProfileLogEntry.Message -Level $buildProfileLogEntry.Level
     }
 
-    $domainIdentity = Get-AdDomainIdentity -GlobalConfigPath (Join-Path -Path $stagedPayloadPath -ChildPath 'include\global-config.ps1') -AdDomainSourcePath $adDomainSourceFullPath
-    # The validator names the staged profile; each line is logged naming the origin file.
-    $originPathParameters = @{ StagedProfilePath = $buildProfileSelection.StagedProfilePath; OriginPath = $buildProfileSelection.OriginPath }
-    if ($domainIdentity.Summary) {
-        Write-Log (@(ConvertTo-OriginProfilePathText -Text @($domainIdentity.Summary) @originPathParameters) -join ' ') -Level INFO
+    # The version handshake. Each sibling's header Version is read by parsing, never by
+    # running it. An older new-AdDomain can't apply its override file, so it stops here,
+    # naming the version found and the version needed. An older VM builder only WARNs,
+    # unless it has an override file it would ignore. An unreadable header WARNs, and the
+    # feature checks below still apply.
+    $stagedDeploymentScriptPath = Join-Path -Path $stagedPayloadPath -ChildPath 'New-ADForestDeployment.ps1'
+    $adDomainVersionCheck = Test-SiblingVersion -ProjectName 'new-AdDomain' -ScriptPath $adForestDeploymentScriptPath `
+        -FoundVersion (Get-ScriptHeaderVersion -Path $stagedDeploymentScriptPath) -MinimumVersion $minimumAdDomainVersion
+    switch ($adDomainVersionCheck.Status) {
+        'Ok'         { Write-Log $adDomainVersionCheck.Message -Level INFO }
+        'Unreadable' { Write-Log $adDomainVersionCheck.Message -Level WARN }
+        'Below'      { throw "$($adDomainVersionCheck.Message) An older new-AdDomain can't apply its override file, so build-lab stopped before any VM was built or changed. Update new-AdDomain, or point -AdDomainSourcePath at a copy that is $minimumAdDomainVersion or later." }
     }
-    foreach ($buildProfileInfoLine in @(ConvertTo-OriginProfilePathText -Text $domainIdentity.Info @originPathParameters)) {
+    if (-not $MoveMemberServers) {
+        $vmBuilderVersionCheck = Test-SiblingVersion -ProjectName 'New-VMwareWorkstationVM' -ScriptPath $VmBuilderScriptPath `
+            -FoundVersion (Get-ScriptHeaderVersion -Path $VmBuilderScriptPath) -MinimumVersion $minimumVmBuilderVersion
+        $vmBuilderOverridePath = Join-Path -Path (Split-Path -Path $VmBuilderScriptPath -Parent) -ChildPath 'overrides\overrides.psd1'
+        switch ($vmBuilderVersionCheck.Status) {
+            'Ok'         { Write-Log $vmBuilderVersionCheck.Message -Level INFO }
+            'Unreadable' { Write-Log $vmBuilderVersionCheck.Message -Level WARN }
+            'Below' {
+                if (Test-Path -LiteralPath $vmBuilderOverridePath) {
+                    throw "$($vmBuilderVersionCheck.Message) That version doesn't read an override file, and '$vmBuilderOverridePath' exists, so its settings would be ignored. build-lab stopped before any VM was built or changed. Update New-VMwareWorkstationVM, or move its override file out of the overrides folder."
+                }
+                Write-Log "$($vmBuilderVersionCheck.Message) It doesn't read an override file, and it has none, so build-lab goes on with it as it is." -Level WARN
+            }
+        }
+    }
+    $requiredGlobalConfig = Get-RequiredGlobalConfigVersion -ScriptPath @($stagedDeploymentScriptPath, (Join-Path -Path $stagedPayloadPath -ChildPath 'Initialize-ADDirectory.ps1'))
+    if (-not $requiredGlobalConfig.Version -and $adDomainVersionCheck.Status -eq 'Ok') {
+        Write-Log "new-AdDomain's scripts name no oldest global-config.ps1 they run with, so its version isn't checked. $(@($requiredGlobalConfig.Problems) -join ' ')" -Level WARN
+    }
+
+    $domainIdentity = Get-AdDomainIdentity -GlobalConfigPath (Join-Path -Path $stagedPayloadPath -ChildPath 'include\global-config.ps1') -AdDomainSourcePath $adDomainSourceFullPath `
+        -RequiredGlobalConfigVersion ([string]$requiredGlobalConfig.Version)
+    # The validator names staged files. Each line is logged naming the file to edit: the
+    # profile's origin first, then anything else under the staged copy, such as the
+    # override file or a replacement CSV, under the source new-AdDomain.
+    $originPathParameters  = @{ StagedProfilePath = $buildProfileSelection.StagedProfilePath; OriginPath = $buildProfileSelection.OriginPath }
+    $payloadPathParameters = @{ StagedProfilePath = $stagedPayloadPath; OriginPath = $adDomainSourceFullPath }
+    $originTextFor = { param ([string[]]$Text) @(ConvertTo-OriginProfilePathText -Text @(ConvertTo-OriginProfilePathText -Text $Text @originPathParameters) @payloadPathParameters) }
+    if ($domainIdentity.Summary) {
+        Write-Log (@(& $originTextFor @($domainIdentity.Summary)) -join ' ') -Level INFO
+    }
+    foreach ($buildProfileInfoLine in @(& $originTextFor @($domainIdentity.Info))) {
         Write-Log $buildProfileInfoLine -Level INFO
     }
-    foreach ($buildProfileWarningLine in @(ConvertTo-OriginProfilePathText -Text $domainIdentity.Warnings @originPathParameters)) {
+    foreach ($buildProfileWarningLine in @(& $originTextFor (@($domainIdentity.Warnings) + @($domainIdentity.PairWarnings)))) {
         Write-Log $buildProfileWarningLine -Level WARN
     }
-    if ($domainIdentity.Error) {
+    if ($domainIdentity.Error -or $domainIdentity.PairError) {
         # One stop per line, each starting with its source. Each is logged on its own line.
-        $buildProfileErrorLines = @(ConvertTo-OriginProfilePathText -Text @($domainIdentity.Error -split '\r?\n' | Where-Object { $_.Trim() }) @originPathParameters)
+        $buildProfileErrorLines = @(& $originTextFor @(@($domainIdentity.Error, $domainIdentity.PairError) -split '\r?\n' | Where-Object { $_ -and $_.Trim() }))
         foreach ($buildProfileErrorLine in $buildProfileErrorLines) {
             Write-Log $buildProfileErrorLine -Level ERROR
         }
         throw "The build configuration is not valid, so build-lab stopped before any VM was built or changed. $($buildProfileErrorLines -join ' ')"
     }
+    $sourceServiceAccountCsvPath = @(& $originTextFor @([string]$domainIdentity.ServiceAccountCsvPath))[0]
     if ($domainIdentity.PlaceholderRows.Count -gt 0) {
-        $sourceServiceAccountCsvPath = Join-Path -Path $adDomainSourceFullPath -ChildPath 'config\serviceaccounts.csv'
         $placeholderRowText = (@($domainIdentity.PlaceholderRows) | ForEach-Object { "'$($_.Name)' SPN '$($_.ServicePrincipalName)'" }) -join '; '
         throw "'$sourceServiceAccountCsvPath' has SPNs that still hold '{' or '}' after {DomainName} is substituted, so build-lab stopped before any VM was built or changed. Rows: $placeholderRowText. The only placeholder is {DomainName}, in any case. Fix those rows."
     }
+    # An SPN that names a host in another domain is kept as written, with one WARN per
+    # row, as the guest does. Only a run that deploys the DC, a full build or -SkipVmBuild,
+    # gets the WARN, because only the deployment creates the service accounts. An add or
+    # move run creates none, and it hasn't read the DC's own domain yet, so with the
+    # fallback to that domain the line could name the wrong one.
+    if (-not ($AddMemberServers -or $MoveMemberServers)) {
+        foreach ($otherDomainRow in @($domainIdentity.OtherDomainRows)) {
+            Write-Log "'$sourceServiceAccountCsvPath' row $($otherDomainRow.RowNumber) (Name '$($otherDomainRow.Name)'): SPN '$($otherDomainRow.ServicePrincipalName)' names host '$($otherDomainRow.HostName)', which is outside the build's domain '$($domainIdentity.DomainName)'. It is written as given. If it should follow the domain, write it as '$($otherDomainRow.SuggestedServicePrincipalName)'." -Level WARN
+        }
+    }
     # Where the expected domain came from, for the DC cross-check's mismatch message.
-    $domainIdentitySource = if ($buildProfileSelection.ProfileInUse) { "the build profile '$($buildProfileSelection.OriginPath)'" } else { 'global-config.ps1' }
+    $domainIdentitySource = switch ($domainIdentity.DomainNameSource) {
+        'Profile'      { "the build profile '$($buildProfileSelection.OriginPath)'" }
+        'OverrideFile' { "new-AdDomain's override file '$(Join-Path -Path $adDomainSourceFullPath -ChildPath 'overrides\overrides.psd1')'" }
+        default {
+            if ($buildProfileSelection.ProfileInUse -and -not $domainIdentity.DomainNameSource) { "the build profile '$($buildProfileSelection.OriginPath)'" }
+            else { 'global-config.ps1' }
+        }
+    }
 
     # The DC's own address and the gateway: the address the DC is about to get (full build)
     # or already has (-AddMemberServers). Not supplied for -SkipVmBuild / -MoveMemberServers.
@@ -2515,6 +2903,27 @@ try {
         if ($MemberServerCount -gt 0) {
             throw "-MoveMemberServers runs on its own and builds nothing. Run the member server build (-MemberServerCount) and the move as separate invocations."
         }
+
+        Write-Log "Waiting for the DC to answer guest operations (timeout: $GuestReadyTimeoutMinutes minute(s))..." -Level INFO
+        Wait-GuestOperationsReady -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential -TimeoutMinutes $GuestReadyTimeoutMinutes
+        Initialize-GuestTempDirectory -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential
+
+        # The configuration is read again on this run, so confirm it still describes this DC.
+        # With nothing naming a domain, the DC's own domain applies, and the identity is
+        # final before the OU table below captures ServersOU.
+        $domainControllerIdentity = Get-GuestDomainControllerIdentity -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential `
+            -HostStagingPath $stagingRootPath
+        $memberDomainResolution = Resolve-MemberDomainIdentity -StagedIdentity $domainIdentity -DomainControllerIdentity $domainControllerIdentity -VmxFilePath $vmxFilePath
+        if ($memberDomainResolution.Warning) {
+            Write-Log $memberDomainResolution.Warning -Level WARN
+        }
+        $domainIdentity = $memberDomainResolution.Identity
+        $identityMismatches = @(Compare-DomainControllerIdentity -Identity $domainControllerIdentity -ExpectedDomainName $domainIdentity.DomainName `
+            -ExpectedDomainSource $domainIdentitySource)
+        if ($identityMismatches.Count -gt 0) {
+            throw "Nothing was moved: the VM at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Check -VmStoragePath and -VmName, the build profile, and new-AdDomain's override file and global-config.ps1."
+        }
+
         $memberServerOuParameters = @{
             VmrunPath               = $vmrunPath
             VmxFilePath             = $vmxFilePath
@@ -2522,19 +2931,6 @@ try {
             ServersOu               = $domainIdentity.ServersOU
             MemberServerNamePattern = $memberServerNamePattern
             HostStagingPath         = $stagingRootPath
-        }
-
-        Write-Log "Waiting for the DC to answer guest operations (timeout: $GuestReadyTimeoutMinutes minute(s))..." -Level INFO
-        Wait-GuestOperationsReady -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential -TimeoutMinutes $GuestReadyTimeoutMinutes
-        Initialize-GuestTempDirectory -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential
-
-        # The configuration is read again on this run, so confirm it still describes this DC.
-        $domainControllerIdentity = Get-GuestDomainControllerIdentity -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential `
-            -HostStagingPath $stagingRootPath
-        $identityMismatches = @(Compare-DomainControllerIdentity -Identity $domainControllerIdentity -ExpectedDomainName $domainIdentity.DomainName `
-            -ExpectedDomainSource $domainIdentitySource)
-        if ($identityMismatches.Count -gt 0) {
-            throw "Nothing was moved: the VM at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Check -VmStoragePath and -VmName, the build profile, and new-AdDomain's global-config.ps1."
         }
 
         $memberServerOuState = Get-GuestMemberServerOuState @memberServerOuParameters
@@ -2550,7 +2946,7 @@ try {
         }
         else {
             if ($memberServersToMove.Count -gt $maxMemberServerCount) {
-                throw "$($memberServersToMove.Count) member server computer objects match '$memberServerNamePattern', more than the cap of $maxMemberServerCount. Nothing was moved. Check the computers container for unexpected objects, or raise `$maxMemberServerCount in the Variables region of build-lab.ps1."
+                throw "$($memberServersToMove.Count) member server computer objects match '$memberServerNamePattern', more than the cap of $maxMemberServerCount. Nothing was moved. Check the computers container for unexpected objects, or raise MaxMemberServerCount in overrides\overrides.psd1 (OVERRIDE.md lists it)."
             }
             $moveResult = Move-GuestMemberServerToServersOu @memberServerOuParameters -MaxObjectCount $maxMemberServerCount
             Write-Log "Moved to '$($domainIdentity.ServersOU)': $(@($moveResult.Moved) -join ', ')." -Level INFO
@@ -2586,12 +2982,19 @@ try {
         Initialize-GuestTempDirectory -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential
         # Members use -StaticIpAddress as their DNS server and join global-config.ps1's
         # domain, so both have to match the real DC before any member is planned or built.
+        # With nothing naming a domain, the DC's own domain applies. The identity is final
+        # here, before the member plan, the join credential and the joins use it.
         $domainControllerIdentity = Get-GuestDomainControllerIdentity -VmrunPath $vmrunPath -VmxFilePath $vmxFilePath -GuestCredential $guestCredential `
             -HostStagingPath $stagingRootPath
+        $memberDomainResolution = Resolve-MemberDomainIdentity -StagedIdentity $domainIdentity -DomainControllerIdentity $domainControllerIdentity -VmxFilePath $vmxFilePath
+        if ($memberDomainResolution.Warning) {
+            Write-Log $memberDomainResolution.Warning -Level WARN
+        }
+        $domainIdentity = $memberDomainResolution.Identity
         $identityMismatches = @(Compare-DomainControllerIdentity -Identity $domainControllerIdentity -ExpectedDomainName $domainIdentity.DomainName `
             -ExpectedDomainSource $domainIdentitySource -ExpectedIpAddress $StaticIpAddress -ExpectedPrefixLength $staticIpPrefixLength -ExpectedDefaultGateway $DefaultGateway)
         if ($identityMismatches.Count -gt 0) {
-            throw "No member servers were built: the DC at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Pass the DC's real -StaticIpAddress, -SubnetMask and -DefaultGateway, and check the build profile and new-AdDomain's global-config.ps1."
+            throw "No member servers were built: the DC at '$vmxFilePath' does not match this run: $($identityMismatches -join '; '). Pass the DC's real -StaticIpAddress, -SubnetMask and -DefaultGateway, and check the build profile and new-AdDomain's override file and global-config.ps1."
         }
         $gatewayCheckDetail = if ($DefaultGateway) { "gateway $DefaultGateway matches" } else { 'gateway not checked and not set on the members, because -DefaultGateway was not given' }
         Write-Log "Existing DC verified ('$ntdsFilePath' present; domain and address match; $gatewayCheckDetail)." -Level SUCCESS
@@ -2614,7 +3017,7 @@ try {
     $memberServerPlan = @()
     if ($MemberServerCount -gt 0) {
         if ($MemberServerCount -gt $maxMemberServerCount) {
-            throw "-MemberServerCount $MemberServerCount exceeds the cap of $maxMemberServerCount. Lower -MemberServerCount, or raise `$maxMemberServerCount in the Variables region of build-lab.ps1."
+            throw "-MemberServerCount $MemberServerCount exceeds the cap of $maxMemberServerCount. Lower -MemberServerCount, or raise MaxMemberServerCount in overrides\overrides.psd1 (OVERRIDE.md lists it)."
         }
 
         # The lowest free numbers, gaps first. Existing SRVR-NN folders and reserved names are

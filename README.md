@@ -68,9 +68,18 @@ And one thing requires a tiny bit of your effort. Creating OUs, users, groups, t
 
 ## What's Changed Since 1.0
 
-1.0 built one domain controller. The current version still does that, the same way, and adds member servers, build profiles, and a fair amount of hardening that came out of reviews and live runs.
+1.0 built one domain controller. The current version still does that, the same way, and adds member servers, build profiles, an override file for your standing settings, and a fair amount of hardening that came out of reviews and live runs.
 
-**Thinking of upgrading?** 2.1 is a feature release, not a bug fix. If you don't need anything below, you may do better waiting for the next version. That one is planned to keep every setting you might change in an override file that upgrades leave alone, with a small script that moves your current edits into it. If you do upgrade now, [UPGRADE.md](UPGRADE.md) has the steps from 2.0 and from 1.0.
+**Upgrading?** From 2.2 on, every setting you might change lives in an override file that upgrades leave alone, and a small script moves the edits you already made into it. [UPGRADE.md](UPGRADE.md) has the steps from 2.1, 2.0 and 1.0.
+
+### New in 2.2
+
+- **An override file.** `overrides\overrides.psd1` in the project folder holds the settings you keep from run to run, such as `-RamMB`, `-NetworkType` or the member server cap, so you stop retyping them and stop editing the script. Git ignores the folder, so `git pull` never touches it. A value on the command line still wins. Every key, its default and what it accepts is in [OVERRIDE.md](OVERRIDE.md). The two sibling projects have override files of their own, and build-lab hands new-AdDomain's to the guest with the rest of the payload.
+- **A migration script.** `Export-OverrideFile.ps1` reads an older copy of build-lab without running it, and writes the defaults you edited into the new override file. new-AdDomain and New-VMwareWorkstationVM each ship their own.
+- **Member work against an older DC needs no profile.** When nothing names a domain (no profile, no override file and no edit to `global-config.ps1`), `-AddMemberServers` and `-MoveMemberServers` read the DC's own domain from the DC and use it, with a WARN. A domain you did name still has to match the DC.
+- **The siblings' versions are checked.** build-lab 2.2 goes with new-AdDomain 2.1 and New-VMwareWorkstationVM 1.1, and reads the version line of their scripts before it builds anything. An older new-AdDomain stops the run, with the version found and the version needed. An older VM builder is a WARN, unless it has an override file it would ignore. An older `global-config.ps1` copied over the new one stops the run too, and the message says that is what happened.
+- **A changed default is named.** When a shipped default changes from one release to the next, and your run didn't set that setting itself, the log gets one INFO line naming the old and new value and the override key that keeps the old one. 2.2 changes none of build-lab's defaults, so you won't see one from build-lab this time.
+- **More of the guest's checks happen on the host first.** The staged copy of new-AdDomain is read with its override file in place, so a bad value there stops the run before a VM exists. A replacement `serviceaccounts.csv` gets the same placeholder check as the shipped one. An SPN that names a host in another domain gets the guest's WARN on the host as well, in a run that deploys the DC. A count minimum set above its maximum, both in new-AdDomain's override file, stops the run.
 
 ### New in 2.1
 
@@ -148,8 +157,8 @@ Updating from 2.0 changes three things you may rely on. The first two stop the r
 - **Windows PowerShell 5.1.** This targets 5.1, where `Write-EventLog` is the correct API, and refuses to start anywhere else. See [Known Limitations](#known-limitations) if you are thinking about a PowerShell 7 port.
 - **Local Administrator on the host,** to register the `build-lab` Application event log source. That is the only thing that needs it. If registration fails, the script falls back to the built-in `Application` source automatically and keeps going, so an unelevated run works fine. The guest operations authenticate against the guest, not the host.
 - **A Windows Server 2025 ISO.** The DC and every member server are built from it.
-- **The two sibling projects.** `New-VMwareWorkstationVM` and `new-AdDomain` are expected to sit next to this project on disk (`..\New-VMwareWorkstationVM` and `..\new-AdDomain`). If you keep them somewhere else, point at them with `-VmBuilderScriptPath` and `-AdDomainSourcePath`. The domain name comes from `new-AdDomain\include\global-config.ps1`, or from the [build profile](#build-profiles) when you use one.
-- **new-AdDomain 2.0.** That is the release that ships `include\BuildProfile.ps1`, which build-lab 2.1 uses to check the staged copy. Point build-lab at an older copy and it stops before building anything, with a message that says so.
+- **The two sibling projects.** `New-VMwareWorkstationVM` and `new-AdDomain` are expected to sit next to this project on disk (`..\New-VMwareWorkstationVM` and `..\new-AdDomain`). If you keep them somewhere else, point at them with `-VmBuilderScriptPath` and `-AdDomainSourcePath`. The domain name comes from new-AdDomain's override file or `include\global-config.ps1`, or from the [build profile](#build-profiles) when you use one.
+- **new-AdDomain 2.1 and New-VMwareWorkstationVM 1.1.** Those are the releases with override files. build-lab reads each one's version before it builds anything. An older new-AdDomain stops the run, with a message naming the version it found and the one it needs. An older VM builder gets a WARN.
 
 ```text
 Sibling Projects/
@@ -179,6 +188,12 @@ Clone the repository:
 ```powershell
 git clone https://github.com/0x44616e69656c/build-lab.git
 cd build-lab
+```
+
+Downloaded the zips instead? Windows blocks files downloaded from the internet by default, and a `RemoteSigned` execution policy won't run a blocked script. Look the files over, then unblock all three projects from the folder that holds them:
+
+```powershell
+Get-ChildItem -Recurse -File | Unblock-File
 ```
 
 Then run it:
@@ -297,7 +312,7 @@ Member servers are Windows Server 2025 VMs built with the same VM builder as the
 - **The join.** `Add-Computer` runs in the guest as the domain's built-in Administrator, which has the same password as `-AdminPassword`. The reboot that completes the join is launched separately, and build-lab waits until the guest has actually rebooted and reports membership of the domain. `-DomainJoinTimeoutMinutes` (20) bounds that wait.
 - **When one fails.** It is logged and the rest carry on. A summary at the end lists every member, and the run exits with code 1 if any failed. The DC is not affected.
 - **Where they land.** In the domain's default `CN=Computers` container. `OU=Servers` is created by directory population, so the move is a separate later step. Log into the DC, let population finish, then run `-MoveMemberServers`. It moves only objects named exactly `SRVR-NN`, refuses to move anything if more match than the cap, re-checks afterwards that none were left behind, and is safe to run again.
-- **How many.** Five per run by default. The cap is `$maxMemberServerCount` in the script's Variables region, because a scope limit is something you should only change on purpose.
+- **How many.** A cap per run, the `MaxMemberServerCount` setting in the [override file](OVERRIDE.md). It is a setting and not a parameter because a scope limit is something you should only change on purpose.
 
 ## Build Profiles
 
@@ -312,7 +327,7 @@ A build profile is a small `.psd1` file that says which forest to build. Pass it
 }
 ```
 
-A key you leave out keeps its `global-config.ps1` value. The full list of keys, what each one accepts, and what happens to an empty or clashing value belong to `new-AdDomain`, so its README is the place to look.
+A key you leave out keeps the value from new-AdDomain's override file, or its shipped value. The full list of keys, what each one accepts, and what happens to an empty or clashing value belong to `new-AdDomain`, so its [OVERRIDE.md](https://github.com/0x44616e69656c/new-AdDomain/blob/main/OVERRIDE.md#build-profile) is the place to look.
 
 Before anything is built, build-lab reads the staged copy the same way the guest will. A typo, or a key it does not know, stops the run right there with the problem named, and the log points at your file rather than at the temp copy. The guest later runs exactly the files that were checked.
 
@@ -333,7 +348,7 @@ The second row is the one to watch. A file you never named on the command line d
 
 ### A DC built before lab.test
 
-The default domain is now `lab.test`. A DC built with an older `new-AdDomain` is in `lab.local`, and without a profile the add and move runs refuse it. Save these two lines as a profile and pass it to those runs with `-ProfilePath`.
+The default domain is now `lab.test`. A DC built with an older `new-AdDomain` is in `lab.local`. When nothing names a domain, the add and move runs read the DC's own domain and use it, with a WARN. A full build still gives `lab.test`. To keep building `lab.local`, set `DomainName` and `NetBIOSName` in new-AdDomain's override file, or save these two lines as a profile and pass it with `-ProfilePath`. Once a domain is named, the add and move runs check the DC against it again.
 
 ```powershell
 @{ DomainName = 'lab.local'; NetBIOSName = 'LAB' }
@@ -341,7 +356,11 @@ The default domain is now `lab.test`. A DC built with an older `new-AdDomain` is
 
 ### The early address check
 
-In a full build with an explicit `PrimarySubnet` (anything other than `Auto`), build-lab checks that the DC's `-StaticIpAddress` sits inside it before building anything. A miss is a WARN and the build carries on. The guest then uses the DC's own subnet instead, and its "Requested subnet" test row fails, so the miss shows up in the test results and not only in the log. That is the usual sign of a profile copied from another lab. The other three modes skip the check. `-SkipVmBuild` has no address to check, and the add and move modes never run directory population.
+In a full build with an explicit `PrimarySubnet` (anything other than `Auto`), build-lab checks that the DC's `-StaticIpAddress` sits inside it before building anything. A miss is a WARN and the build carries on. The guest then uses the DC's own subnet instead, and its "Requested subnet" test row fails, so the miss shows up in the test results as well as the log. That is the usual sign of a profile copied from another lab. The other three modes skip the check. `-SkipVmBuild` has no address to check, and the add and move modes never run directory population.
+
+## Overrides
+
+Every setting you can change without editing a script, and how, is in [OVERRIDE.md](OVERRIDE.md). To carry the edits you made to an older copy across, see [UPGRADE.md](UPGRADE.md).
 
 ## Parameters
 
@@ -353,6 +372,8 @@ There are four ways to run the script, chosen by switch:
 | Re-run the guest phases | `-SkipVmBuild` | `-AdminPassword`, `-VmStoragePath`, `-VmName`. No `-IsoPath`, `-StaticIpAddress` or members. Refuses a promoted DC. |
 | Add members to an existing DC | `-AddMemberServers` | `-IsoPath`, `-AdminPassword`, `-VmStoragePath`, `-VmName`, the DC's `-StaticIpAddress`, and `-MemberServerCount` of 1 or more. |
 | Move members to `OU=Servers` | `-MoveMemberServers` | `-AdminPassword`, `-VmStoragePath`, `-VmName`. Builds nothing. |
+
+A parameter's default can also be changed in the override file. [OVERRIDE.md](OVERRIDE.md) says which, and the command line wins over the file.
 
 | Parameter | Default | Notes |
 |---|---|---|
@@ -375,7 +396,7 @@ There are four ways to run the script, chosen by switch:
 | `-ProfilePath` | none | A build profile (`.psd1`) for this run, in all four modes. Must name an existing `.psd1` file. See [Build Profiles](#build-profiles). |
 | `-GuestReadyTimeoutMinutes` | `20` | How long to wait for a guest to answer guest operations, and for the DC's promotion reboot after `ntds.dit` appears (1 to 120). |
 | `-DeploymentTimeoutMinutes` | `30` | How long to poll for `ntds.dit` before failing (1 to 240). Raise it if the guest is slow or heavily loaded. |
-| `-MemberServerCount` | `0` | Member servers to build and join. Capped at 5 per run by `$maxMemberServerCount`. |
+| `-MemberServerCount` | `0` | Member servers to build and join. Capped by the [`MaxMemberServerCount`](OVERRIDE.md#settings) setting. |
 | `-MemberRamMB` | `2048` | Member RAM in MB (512 to 65536). |
 | `-MemberCpuCount` | `1` | Member virtual CPUs (1 to 64). |
 | `-MemberDiskGB` | `60` | Member virtual disk size in GB (20 to 2048). |
@@ -388,19 +409,19 @@ There are four ways to run the script, chosen by switch:
 
 Logs live in `<script dir>\logs`. Because build-lab drives a child script and a guest, one folder collects logs from three different places. Every run produces:
 
-- `build-lab_<timestamp>.log` -- the orchestrator's own text log, every level. The first line names the script version.
-- `build-lab-errors_<timestamp>.csv` -- the orchestrator's structured rows, WARN, ERROR, and FATAL only. Columns: `Timestamp,Level,Script,Message`. Import with `Import-Csv`.
+- `build-lab_<timestamp>.log` - the orchestrator's own text log, every level. The first line names the script version.
+- `build-lab-errors_<timestamp>.csv` - the orchestrator's structured rows, WARN, ERROR, and FATAL only. The columns are `Timestamp,Level,Script,Message`. Import with `Import-Csv`.
 
 Every VM build (the DC in a full build, and each member server) also gets the VM builder's own logs, written here because build-lab hands it this folder as its `-LogPath`:
 
-- `VMDeploy_<timestamp>.csv` -- the VM build log, every level. Different shape from the orchestrator's CSV. Columns: `Timestamp,Level,Message,ErrorDetail`.
-- `VMDeploy_<timestamp>_Transcript.txt` -- a full PowerShell transcript of the VM build. This is the one to read when the VM itself is the problem.
+- `VMDeploy_<timestamp>.csv` - the VM build log, every level. Different shape from the orchestrator's CSV. The columns are `Timestamp,Level,Message,ErrorDetail`.
+- `VMDeploy_<timestamp>_Transcript.txt` - a full PowerShell transcript of the VM build. This is the one to read when the VM itself is the problem.
 
 And on the way out of a DC deployment (a full build or `-SkipVmBuild`):
 
-- `guest-<timestamp>\` -- the guest's own `new-AdDomain` deployment logs, pulled back from the VM. This happens whether the promotion was verified or not. After a verified promotion you get them for the record, and after a failure you get them so you can read why, which is the case you actually care about. Retrieval is best-effort either way. If the guest is mid-reboot or the folder is not there, you get a WARN instead of the logs. A verified promotion still succeeds without them. A failed one was already failing, and losing the logs just means failing without the evidence.
+- `guest-<timestamp>\` - the guest's own `new-AdDomain` deployment logs, pulled back from the VM. This happens whether the promotion was verified or not. After a verified promotion you get them for the record, and after a failure you get them so you can read why, which is the case you actually care about. Retrieval is best-effort either way. If the guest is mid-reboot or the folder is not there, you get a WARN instead of the logs. A verified promotion still succeeds without them. A failed one was already failing, and losing the logs just means failing without the evidence.
 
-Key events also go to the Windows Application event log under the `build-lab` source for SIEM ingestion. Set `$enableEventLogging` to `$false` in the script's variable section to turn that off.
+Key events also go to the Windows Application event log under the `build-lab` source for SIEM ingestion. The [`EnableEventLogging`](OVERRIDE.md#settings) setting turns that off.
 
 | Event ID | Type | Meaning |
 |---|---|---|
@@ -448,7 +469,7 @@ If you file a bug report, include everything in the `logs` folder.
       copyFileFromGuestToHost 'C:\VMs\DC01\DC01.vmx' 'C:\temp\adDeploymentLogs.zip' 'C:\temp\adDeploymentLogs.zip'
   ```
 - **`Write-EventLog` is deprecated in PowerShell 7+.** This script targets 5.1, where it is correct. A PowerShell 7 port would need `New-WinEvent` against a registered ETW manifest.
-- **Not every VM builder option is exposed.** build-lab passes through the parameters in the table above and no others, so `-Edition`, `-TimeZone`, and `-ProductKey` fall back to `New-VMwareWorkstationVM.ps1`'s own defaults. In practice that means you always get Standard edition, on Pacific time, with no product key, on the DC and the members alike. If you need Datacenter or a different time zone, call the VM builder directly and then come back with `-SkipVmBuild`. Alternatively, you could edit the defaults in the script within your own repo. Your call. I might extract the config elements to a separate file like I did in `new-AdDomain` to make this easier to manage. Put in the request if this matters to you.
+- **Not every VM builder option is exposed.** build-lab passes through the parameters in the table above and no others, so `-Edition`, `-TimeZone`, `-ProductKey` and the rest come from New-VMwareWorkstationVM itself. Set them in that project's override file, as its [OVERRIDE.md](https://github.com/0x44616e69656c/New-VMwareWorkstationVM/blob/main/OVERRIDE.md) describes, and every VM build-lab builds picks them up, the DC and the members alike. The settings build-lab does pass win over that file, so set those in build-lab's own.
 
 ## Security Notes
 
@@ -459,39 +480,55 @@ This is a lab tool and it makes trades a production tool has no business making.
 - **The domain join puts that password on the member's command line too.** Members join as the domain's built-in Administrator, and the password is embedded in the command build-lab runs in the guest. It shows in the host and guest process lists while the join runs, and depending on the member's audit and PowerShell logging settings it may stay in its event logs or transcripts afterwards.
 - **Keep it out of your shell history.** The examples use `ConvertTo-SecureString 'P@ssw0rd!' -AsPlainText -Force` because it reads well on a page, but it puts the plaintext in your session and your history. `-AdminPassword` is a mandatory `SecureString`, so you can leave it off the command line entirely and let PowerShell prompt you with masked input.
 - **vmrun output is password-scrubbed before it hits the logs, and nothing else is.** The password is replaced with `***` in anything vmrun returns, error text included, and in the error text a guest command sends back. Host paths, IP addresses, usernames, and VM names are not. Read a log before you paste it into an issue.
-- **The payload stays in the guest.** `C:\temp\new-AdDomain` is left in place on the DC after the build. The payload zip and the log bundle build-lab pulls back (`C:\temp\adDeploymentLogs.zip`) are removed, the log bundle on a best-effort basis. Fine for a lab you are about to throw away, worth a thought if the VM outlives the experiment.
+- **The payload stays in the guest.** `C:\temp\new-AdDomain` is left in place on the DC after the build. That includes new-AdDomain's `overrides` folder, so its override file, the DSRM password if you set one there, and any replacement CSV stay on the DC too. The payload zip and the log bundle build-lab pulls back (`C:\temp\adDeploymentLogs.zip`) are removed, the log bundle on a best-effort basis. Fine for a lab you are about to throw away, worth a thought if the VM outlives the experiment.
 
 ## Troubleshooting
 
-**"-SkipVmBuild was specified but no VMX exists at ..."** (or `-AddMemberServers` / `-MoveMemberServers`) -- The VMX path is built as `<VmStoragePath>\<VmName>\<VmName>.vmx`. Pass the same `-VmStoragePath` and `-VmName` you built the VM with, and do not include the VM's own folder in `-VmStoragePath`. A VM at `D:\VMware\DC01\DC01.vmx` needs `-VmStoragePath 'D:\VMware' -VmName 'DC01'`.
+**"-SkipVmBuild was specified but no VMX exists at ..."** (or `-AddMemberServers` / `-MoveMemberServers`) - The VMX path is built as `<VmStoragePath>\<VmName>\<VmName>.vmx`. Pass the same `-VmStoragePath` and `-VmName` you built the VM with, and do not include the VM's own folder in `-VmStoragePath`. A VM at `D:\VMware\DC01\DC01.vmx` needs `-VmStoragePath 'D:\VMware' -VmName 'DC01'`.
 
-**"VMX already exists at ..."** -- You are trying to do a full build over an existing VM. Remove the files, or pick a different `-VmName`. If the VM was never promoted, `-SkipVmBuild` reuses it.
+**"VMX already exists at ..."** - You are trying to do a full build over an existing VM. Remove the files, or pick a different `-VmName`. If the VM was never promoted, `-SkipVmBuild` reuses it.
 
-**"-StaticIpAddress ... already answers ping"** or **"Member server SRVR-NN would get ..., which already answers ping"** -- Something on the network already has that address. Nothing was built. Pick a free address for the DC, or free the member's. Remember a member's address follows its number, so moving the DC moves the whole member range.
+**"-StaticIpAddress ... already answers ping"** or **"Member server SRVR-NN would get ..., which already answers ping"** - Something on the network already has that address. Nothing was built. Pick a free address for the DC, or free the member's. Remember a member's address follows its number, so moving the DC moves the whole member range.
 
-**"-StaticIpAddress ... is outside net.3-net.127"** -- On VMware NAT the static range is `.3` to `.127`. See the table in [Quick Start](#quick-start). The member range has to fit too, and the message says how high the DC can go for the members you asked for.
+**"-StaticIpAddress ... is outside net.3-net.127"** - On VMware NAT the static range is `.3` to `.127`. See the table in [Quick Start](#quick-start). The member range has to fit too, and the message says how high the DC can go for the members you asked for.
 
-**"Guest operations did not become ready ..."** -- VMware Tools is not up, or the Administrator credential is being rejected while the guest finishes OOBE/specialize, or `-AdminPassword` is wrong. Open the VM console and watch setup progress. The error message names which of these the last probe hit.
+**"Guest operations did not become ready ..."** - VMware Tools is not up, or the Administrator credential is being rejected while the guest finishes OOBE/specialize, or `-AdminPassword` is wrong. Open the VM console and watch setup progress. The error message names which of these the last probe hit.
 
-**"AD forest promotion did not complete within N minute(s)"** -- `ntds.dit` never appeared. Read the retrieved guest log in `logs\guest-<timestamp>\`. The error message quotes any fatal line it found. If the guest is just slow, raise `-DeploymentTimeoutMinutes`.
+**"Guest operations did not become ready ... (checkToolsState = 'installed')"** - A known bug, fixed in the release after 2.2.0. After the builder's last restart, VMware Workstation can go on reporting Tools as `installed` well after Tools is running in the guest. build-lab only tries the guest for real once the state reads `running`, so it waits for a change that may not come. In testing the state cleared by itself within a few minutes on some VMs and outlasted the 20 minute wait on others. You can unstick it while build-lab is still waiting. Run any guest command against the VM from a second PowerShell window, and build-lab picks the guest up on its next check, about 15 seconds later. This one does nothing but print the user name inside the guest.
 
-**"AD forest promotion was not verified: ..."** -- `ntds.dit` appeared, but either the DC never rebooted within `-GuestReadyTimeoutMinutes`, or it rebooted and does not report itself as a DC in the expected domain. The reason is in the message, and the guest logs were retrieved first. Check the DC's console and the logs before trusting that domain.
+```powershell
+$pw = Read-Host -Prompt 'Guest Administrator password' -AsSecureString
+& 'C:\Program Files\VMware\VMware Workstation\vmrun.exe' -T ws -gu Administrator -gp ([System.Net.NetworkCredential]::new('', $pw).Password) runProgramInGuest 'D:\VMware\DC01\DC01.vmx' 'C:\Windows\System32\whoami.exe'
+Remove-Variable -Name pw
+```
 
-**"... is already a promoted domain controller ..., so -SkipVmBuild stopped before changing it"** -- Working as designed. `-SkipVmBuild` is for a VM whose deployment has not happened or failed early. Use `-AddMemberServers` or `-MoveMemberServers` against a working DC.
+If the run has already stopped, the VM is healthy but holds nothing from build-lab. Delete it and run again with the second window ready. A bigger `-GuestReadyTimeoutMinutes` (up to 120) buys time, but it doesn't fix the cause.
 
-**"No member servers were built: the DC at ... does not match this run"** -- `-AddMemberServers` checked the existing DC and something did not line up. The message says what the DC actually reports. Pass its real `-StaticIpAddress`, `-SubnetMask` and `-DefaultGateway`, and check the domain in `new-AdDomain\include\global-config.ps1`. If the DC was built from a build profile, pass the same one with `-ProfilePath`. The message names the file the expected domain came from.
+**"AD forest promotion did not complete within N minute(s)"** - `ntds.dit` never appeared. Read the retrieved guest log in `logs\guest-<timestamp>\`. The error message quotes any fatal line it found. If the guest is just slow, raise `-DeploymentTimeoutMinutes`.
 
-**"The build configuration is not valid, so build-lab stopped before any VM was built or changed"** -- The build profile or `global-config.ps1` holds something the build cannot use. The ERROR lines just above it name each problem, and each one starts with the file it came from. Fix those and run again. Nothing was built, so there is nothing to clean up.
+**"AD forest promotion was not verified: ..."** - `ntds.dit` appeared, but either the DC never rebooted within `-GuestReadyTimeoutMinutes`, or it rebooted and does not report itself as a DC in the expected domain. The reason is in the message, and the guest logs were retrieved first. Check the DC's console and the logs before trusting that domain.
 
-**"... is a new-AdDomain without build profile support"** -- `-AdDomainSourcePath` (or the sibling folder) holds an older `new-AdDomain` without `include\BuildProfile.ps1`. Update it.
+**"... is already a promoted domain controller ..., so -SkipVmBuild stopped before changing it"** - Working as designed. `-SkipVmBuild` is for a VM whose deployment has not happened or failed early. Use `-AddMemberServers` or `-MoveMemberServers` against a working DC.
 
-**"Domain membership not confirmed within N minute(s)"** -- A member joined but did not finish its reboot in time, or came back without reporting the domain. Check its console. Raise `-DomainJoinTimeoutMinutes` if the host is just slow. The rest of the members still ran, and the summary says which ones failed.
+**"No member servers were built: the DC at ... does not match this run"** - `-AddMemberServers` checked the existing DC and something did not line up. The message says what the DC actually reports. Pass its real `-StaticIpAddress`, `-SubnetMask` and `-DefaultGateway`, and check the domain in new-AdDomain's override file and `include\global-config.ps1`. If the DC was built from a build profile, pass the same one with `-ProfilePath`. The message names the file the expected domain came from.
 
-**"'OU=Servers,...' does not exist yet"** -- `-MoveMemberServers` ran before directory population. Log into the DC as Administrator, wait for the scheduled task to disappear, then run it again.
+**"The override file ... can't be applied, so build-lab stopped before any VM was built or changed"** - build-lab's own `overrides\overrides.psd1` holds a typo, an unknown key, a key that belongs to a sibling project, or a value outside what a setting takes. The ERROR lines above it name the file and the key. [OVERRIDE.md](OVERRIDE.md) lists every key and what it accepts.
 
-**"vmrun.exe not found ..."** -- VMware Workstation is not installed where the script looks. It only checks the two standard Program Files locations, so confirm Workstation 17+ is installed and that `vmrun.exe` sits under one of them. Hack the script if you must, but your edit gets clobbered the next time you pull a new version of the script.
+**"... is version ..., and this build-lab needs ... or later"** - The sibling project is older than this build-lab works with. Update it, or point `-AdDomainSourcePath` or `-VmBuilderScriptPath` at a newer copy. For New-VMwareWorkstationVM this stops only when it has an override file the older copy would ignore, and is a WARN otherwise.
 
-**The build says promotion succeeded but the domain is empty.** -- Working as designed. You still need to log into the guest as Administrator to run directory population. See [Known Limitations](#known-limitations).
+**"new-AdDomain's scripts need include\global-config.ps1 ... or later"** - An older `global-config.ps1` was put back over the current one, usually from an old copy. Restore the current file and move your settings into new-AdDomain's override file with its `Export-OverrideFile.ps1`.
+
+**"The build configuration is not valid, so build-lab stopped before any VM was built or changed"** - The build profile, new-AdDomain's override file or `global-config.ps1` holds something the build cannot use. The ERROR lines just above it name each problem, and each one starts with the file it came from. Fix those and run again. Nothing was built, so there is nothing to clean up.
+
+**"... is a new-AdDomain without build profile support"** - `-AdDomainSourcePath` (or the sibling folder) holds an older `new-AdDomain` without `include\BuildProfile.ps1`. Update it.
+
+**"Domain membership not confirmed within N minute(s)"** - A member joined but did not finish its reboot in time, or came back without reporting the domain. Check its console. Raise `-DomainJoinTimeoutMinutes` if the host is just slow. The rest of the members still ran, and the summary says which ones failed.
+
+**"'OU=Servers,...' does not exist yet"** - `-MoveMemberServers` ran before directory population. Log into the DC as Administrator, wait for the scheduled task to disappear, then run it again.
+
+**"vmrun.exe not found ..."** - VMware Workstation is not installed where the script looks. It only checks the two standard Program Files locations, so confirm Workstation 17+ is installed and that `vmrun.exe` sits under one of them. Hack the script if you must, but your edit gets clobbered the next time you pull a new version of the script.
+
+**The build says promotion succeeded but the domain is empty.** - Working as designed. You still need to log into the guest as Administrator to run directory population. See [Known Limitations](#known-limitations).
 
 ## AI disclosure
 
