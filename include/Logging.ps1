@@ -49,12 +49,15 @@
     Write-Log "Deployment started"
     Write-Log "Failed to create OU" -Level ERROR
 .NOTES
-    Version:          1.0.0
+    Version:          1.0.1
     Author:           Daniel Owen
-    Release Date:     2026-06-11
+    Release Date:     2026-11-19
+    SPDX-License-Identifier: MIT
     Requirements:     Windows PowerShell 5.1. Dot-source Sanitization.ps1 first (hard
                       dependency: Write-Log calls ConvertTo-SafeLogValue for CSV rows).
     Event Log Source: N/A
+.LINK
+    https://github.com/0x44616e69656c/
 #>
 
 #region Module-Level State

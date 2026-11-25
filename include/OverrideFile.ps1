@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
     Reads a project's override file against its catalog, parses scripts without
-    running them, and generates the project's OVERRIDE.md from the catalog.
+    running them, and generates the project's OVERRIDE.md and example override file
+    from the catalog.
 .DESCRIPTION
     Dot-sourced by each project that supports an override file,
     overrides\overrides.psd1. It only defines functions. Loading it writes nothing to the
@@ -22,21 +23,26 @@
                                            declared type and validation attributes,
                                            read through Get-ParameterRule
       - Get-OverrideDocumentationField   : the catalog fields that feed OVERRIDE.md
-                                           and nothing that runs
+                                           and the example file, and nothing that runs
       - Get-OverrideProfileKeyName       : reads the build profile's key names from a
-                                           script's syntax tree, for the generator
+                                           script's syntax tree, for the generators
       - ConvertTo-OverrideDocument       : returns the whole text of OVERRIDE.md,
+                                           generated from the catalog
+      - ConvertTo-OverrideExample        : returns the whole text of the example
+                                           override file, examples\overrides.psd1,
                                            generated from the catalog
       - ConvertTo-ReleaseValueEntry      : returns one release's entry in
                                            include\release-values.psd1, and the whole
                                            file with that entry in place
       - Get-OverrideCsvHash              : the SHA-256 of a CSV's text, after the line
                                            ending differences a clone can bring
-    No deploying run calls the last five. They serve the offline tests, the migration
-    and the writing of OVERRIDE.md and the release table during development.
+    No deploying run calls the last six. They serve the offline tests, the migration
+    and the writing of OVERRIDE.md, the example file and the release table during
+    development.
 
-    This file is before 1.0. Its functions and the catalog's layout may still change
-    between minor versions, and it reaches 1.0.0 once it has been proven in use.
+    A change to a function's parameters or results, or to the catalog's layout, takes a
+    new minor or major version. Each project ships its own copy and takes a newer one
+    only in its own release.
 
     No public function throws. Each sets its error preference locally and reports a
     problem in its returned object. The file is dot-sourced, so it sets no strict mode
@@ -76,16 +82,22 @@
               NotCovered      = @( @{ Name = 'deployRoot'; Reason = '...' } )
               CsvReplacements = @( @{ File = 'first.csv'; Holds = '...'; Headers = @('FirstName') } )
               Security        = @('...')
-              BuildProfile    = @{ Script = 'include\BuildProfile.ps1' }
+              BuildProfile    = @{ Script = 'include\BuildProfile.ps1'
+                                   Pointers = @{  # optional, for a profile key
+                                       # with no row in Settings
+                                       NetworkType    = @{ Project = 'build-lab' }
+                                       PopulationSeed = @{ Key = 'RandomSeed' } } }
           }
       }
 
     The documentation-only fields, which Get-OverrideDocumentationField lists, feed
-    OVERRIDE.md and nothing that runs: Summary, ShippedText (the default in words, and
-    the only default shown for a secret key), ShippedReason, OverrideNote and
-    ValuesNote on a key, and Document at the top. The reader checks only that each is
-    a string, or for Document a table of its four fields, and never requires one.
-    ConvertTo-OverrideDocument requires what OVERRIDE.md needs, as its help says.
+    OVERRIDE.md and the example override file and nothing that runs: Summary,
+    ShippedText (the default in words, and the only default shown for a secret key),
+    ShippedReason, OverrideNote, ValuesNote and ExampleNote (a Parameter key's line in
+    the example file) on a key, and Document at the top. The reader checks only that
+    each is a string, or for Document a table of its four fields, and never requires
+    one. ConvertTo-OverrideDocument and ConvertTo-OverrideExample require what their
+    files need, as their help says.
 
     A Variable or Constant key needs a Rule. A Parameter key may have one, and without
     one the parameter's own attributes check the value when the script assigns it. Rule
@@ -114,13 +126,16 @@
     None when dot-sourced. Each public function returns one PSCustomObject, described in
     its own help.
 .NOTES
-    Version:           0.3.2
+    Version:           1.0.2
     Author:            Daniel Owen
-    Release Date:      2026-11-06
+    Release Date:      2026-11-19
+    SPDX-License-Identifier: MIT
     Requirements:      Windows PowerShell 5.1. No other sharedModules file.
     Target Set Source: N/A
     Event Log Source:  N/A
     Setup:             N/A
+.LINK
+    https://github.com/0x44616e69656c/
 #>
 
 
@@ -436,11 +451,12 @@ function Test-OverrideCatalogRule {
 function Get-OverrideDocumentationField {
     <#
     .SYNOPSIS
-        Returns the catalog fields that feed OVERRIDE.md and nothing that runs.
+        Returns the catalog fields that feed OVERRIDE.md and the example override file
+        and nothing that runs.
     .DESCRIPTION
         The one definition of the documentation-only fields: Key holds the key-level
         names and TopLevel the top-level ones. The reader accepts them and never
-        requires them, and the generator uses them. A release whose catalog changes are
+        requires them, and the two generators use them. A release whose catalog changes are
         confined to these fields changes no run. Shipped and Rule, a rule's Description
         included, are not on the list, because a run reads them. Keep both lists as
         literal string arrays, because a release check reads them from this file's
@@ -452,7 +468,7 @@ function Get-OverrideDocumentationField {
     [OutputType([pscustomobject])]
     param ()
     return [pscustomobject]@{
-        Key      = [string[]]@('Summary', 'ShippedText', 'ShippedReason', 'OverrideNote', 'ValuesNote')
+        Key      = [string[]]@('Summary', 'ShippedText', 'ShippedReason', 'OverrideNote', 'ValuesNote', 'ExampleNote')
         TopLevel = [string[]]@('Document')
     }
 }
@@ -559,6 +575,7 @@ function ConvertFrom-OverrideCatalogData {
                         ShippedReason = $(if ($entry.ContainsKey('ShippedReason')) { [string]$entry['ShippedReason'] } else { $null })
                         OverrideNote  = $(if ($entry.ContainsKey('OverrideNote')) { [string]$entry['OverrideNote'] } else { $null })
                         ValuesNote    = $(if ($entry.ContainsKey('ValuesNote')) { [string]$entry['ValuesNote'] } else { $null })
+                        ExampleNote   = $(if ($entry.ContainsKey('ExampleNote')) { [string]$entry['ExampleNote'] } else { $null })
                     }
                     # Rule and Shipped are set by plain assignment, never through a $( )
                     # subexpression, which would unroll a one-item list to its item and an
@@ -1099,9 +1116,10 @@ function Get-OverrideImageNameSetting {
 
 function ConvertFrom-OverrideXmlText {
     # Decodes XML element text once: the five predefined entities and numeric character
-    # references to characters XML allows. Returns Valid and Value. Text holding a raw
-    # '<', a '&' that starts no reference, an unknown entity, a reference to a character
-    # XML forbids, or ']]>' isn't element text, and comes back not Valid, never guessed.
+    # references, with or without leading zeros, to characters XML allows. Returns Valid
+    # and Value. Text holding a raw '<', a '&' that starts no reference, an unknown
+    # entity, a reference to a character XML forbids, or ']]>' isn't element text, and
+    # comes back not Valid, never guessed.
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param (
@@ -1122,12 +1140,20 @@ function ConvertFrom-OverrideXmlText {
             break
         }
         $null = $decoded.Append($Text.Substring($position, $ampersandIndex - $position))
-        $referenceMatch = [regex]::Match($Text.Substring($ampersandIndex), '\A&(?:(amp|lt|gt|quot|apos)|#([0-9]{1,7})|#x([0-9A-Fa-f]{1,6}));')
+        $referenceMatch = [regex]::Match($Text.Substring($ampersandIndex), '\A&(?:(amp|lt|gt|quot|apos)|#([0-9]+)|#x([0-9A-Fa-f]+));')
         if (-not $referenceMatch.Success) { return $result }
         if ($referenceMatch.Groups[1].Success) {
             $null = $decoded.Append($namedEntities[$referenceMatch.Groups[1].Value])
         } else {
-            $codePoint = if ($referenceMatch.Groups[2].Success) { [int]$referenceMatch.Groups[2].Value } else { [Convert]::ToInt32($referenceMatch.Groups[3].Value, 16) }
+            # XML allows any number of leading zeros. They are dropped first, and a number
+            # still longer than 7 decimal or 6 hex digits is above 0x10FFFF, so it is
+            # refused before a parse that could overflow.
+            $isDecimal = $referenceMatch.Groups[2].Success
+            $digits = if ($isDecimal) { $referenceMatch.Groups[2].Value } else { $referenceMatch.Groups[3].Value }
+            $digits = $digits.TrimStart('0')
+            if ($digits.Length -eq 0) { $digits = '0' }
+            if (($isDecimal -and $digits.Length -gt 7) -or (-not $isDecimal -and $digits.Length -gt 6)) { return $result }
+            $codePoint = if ($isDecimal) { [int]$digits } else { [Convert]::ToInt32($digits, 16) }
             $isXmlCharacter = ($codePoint -eq 0x9) -or ($codePoint -eq 0xA) -or ($codePoint -eq 0xD) -or
                               ($codePoint -ge 0x20 -and $codePoint -le 0xD7FF) -or ($codePoint -ge 0xE000 -and $codePoint -le 0xFFFD) -or
                               ($codePoint -ge 0x10000 -and $codePoint -le 0x10FFFF)
@@ -1167,7 +1193,8 @@ function Read-ScriptSetting {
           - a string, such as 'guestOS = "([^"]*)"'. The capture is returned as written
           - a table, @{ Pattern = '<Organization>([^<]*)</Organization>'; Xml = $true },
             for a capture that is XML element text. The capture is decoded once (&amp;,
-            &lt;, &gt;, &quot;, &apos; and numeric references such as &#38; or &#x26;)
+            &lt;, &gt;, &quot;, &apos; and numeric references such as &#38;, &#x26; or
+            &#00038;)
             before it is returned. Text that isn't valid element text, such as a lone &
             or a raw <, comes back Dynamic with a Reason, never guessed at. Xml = $false,
             or a table with only Pattern, works as a string does
@@ -1177,8 +1204,8 @@ function Read-ScriptSetting {
         PSCustomObject with Path, Error ($null, or why the script couldn't be read, with
         a line number), Version ($null when the header has none), Assignments (Name,
         Line, State Value or Dynamic, Value, in file order, so the last one for a name is
-        the one a run uses), Parameters (Name, Line, State Value, Dynamic or NoDefault,
-        Value, SourceText), ImageNames (Name, Line, State, Value; empty when the script
+        the one a run uses), Parameters (Name, Line, the line of the parameter's name,
+        State Value, Dynamic or NoDefault, Value, SourceText), ImageNames (Name, Line, State, Value; empty when the script
         has no $imageName assignment), TextMatches (Name, Line, State Value, Dynamic,
         Ambiguous, NotFound or BadPattern, Value, SourceText, and Reason, which says why
         a match isn't a Value and never holds the text) and Warnings.
@@ -1269,9 +1296,11 @@ function Read-ScriptSetting {
                 #region Parameter defaults
                 if ($null -ne $scriptAst.ParamBlock) {
                     foreach ($parameterAst in $scriptAst.ParamBlock.Parameters) {
+                        # The name's line. The parameter's own extent starts at its first
+                        # attribute, which may sit on a line above the name.
                         $entry = [pscustomobject]@{
                             Name       = $parameterAst.Name.VariablePath.UserPath
-                            Line       = $parameterAst.Extent.StartLineNumber
+                            Line       = $parameterAst.Name.Extent.StartLineNumber
                             State      = 'NoDefault'
                             Value      = $null
                             SourceText = $null
@@ -1421,8 +1450,9 @@ function Get-ParameterRule {
     .OUTPUTS
         PSCustomObject with Path, Error ($null, or why the script couldn't be read),
         ParseErrorLine ($null, or the first parse error's line) and Parameters (Name,
-        Line, TypeName, TypeKind, Mandatory, and Attributes: Name, Kind, Constant,
-        Positional and Named, in the order written).
+        Line, the line of the parameter's name, not of an attribute above it, TypeName,
+        TypeKind, Mandatory, and Attributes: Name, Kind, Constant, Positional and Named,
+        in the order written).
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -1502,7 +1532,7 @@ function Get-ParameterRule {
 
                     $parameters.Add([pscustomobject]@{
                         Name       = $parameterAst.Name.VariablePath.UserPath
-                        Line       = $parameterAst.Extent.StartLineNumber
+                        Line       = $parameterAst.Name.Extent.StartLineNumber
                         TypeName   = $typeName
                         TypeKind   = $typeKind
                         Mandatory  = $isMandatory
@@ -1730,14 +1760,18 @@ function Get-OverrideProfileKeyName {
     .DESCRIPTION
         Finds exactly one assignment to $keyNames, a constant list of key names, and
         exactly one to $laterItemKeys, a hashtable literal (with or without [ordered])
-        whose keys are constant names, anywhere in the script. Any other shape is an
-        error, so the build-profile part of OVERRIDE.md is never generated from a guess.
-        Never throws.
+        whose keys are constant names, anywhere in the script. $validKeyNames is
+        optional. When the script assigns it, it must be one assignment of a constant
+        list of key names that holds every name in $keyNames and none in
+        $laterItemKeys, and it is the whole list of keys a profile takes. Any other
+        shape is an error, so the build-profile part of OVERRIDE.md is never generated
+        from a guess. Never throws.
     .PARAMETER Path
-        The script that holds both literals, such as include\BuildProfile.ps1.
+        The script that holds the literals, such as include\BuildProfile.ps1.
     .OUTPUTS
-        PSCustomObject with Path, Error ($null, or one problem per line), KeyNames and
-        LaterItemKeys (string arrays, in the order written).
+        PSCustomObject with Path, Error ($null, or one problem per line), KeyNames,
+        ValidKeyNames (empty when the script has no $validKeyNames) and LaterItemKeys,
+        string arrays in the order written.
     #>
     [CmdletBinding()]
     [OutputType([pscustomobject])]
@@ -1748,6 +1782,7 @@ function Get-OverrideProfileKeyName {
     $ErrorActionPreference = 'Stop'
     $problems       = [System.Collections.Generic.List[string]]::new()
     $keyNames       = [System.Collections.Generic.List[string]]::new()
+    $validKeyNames  = [System.Collections.Generic.List[string]]::new()
     $laterItemKeys  = [System.Collections.Generic.List[string]]::new()
     $prefix         = "Script '$Path':"
     $keyNamePattern = '\A[A-Za-z][A-Za-z0-9]*\z'
@@ -1783,20 +1818,43 @@ function Get-OverrideProfileKeyName {
                     return $null
                 }
 
-                $keyNameAssignments = @(& $findAssignment 'keyNames')
-                $keyNamesFound = $false
-                if ($keyNameAssignments.Count -eq 1) {
-                    $listAst = & $expressionOf $keyNameAssignments[0].Right
+                # A constant list of key names from one assignment's right side, or $null.
+                $keyListOf = {
+                    param ($assignmentAst)
+                    $listAst = & $expressionOf $assignmentAst.Right
                     $listValue = $null
                     if ($null -ne $listAst) { try { $listValue = $listAst.SafeGetValue() } catch { $listValue = $null } }
                     $listItems = @($listValue)
                     if ($null -ne $listValue -and $listItems.Count -gt 0 -and @($listItems | Where-Object { -not ($_ -is [string]) -or $_ -cnotmatch $keyNamePattern }).Count -eq 0) {
-                        foreach ($listItem in $listItems) { $keyNames.Add([string]$listItem) }
+                        return , ([string[]]$listItems)
+                    }
+                    return $null
+                }
+
+                $keyNameAssignments = @(& $findAssignment 'keyNames')
+                $keyNamesFound = $false
+                if ($keyNameAssignments.Count -eq 1) {
+                    $keyList = & $keyListOf $keyNameAssignments[0]
+                    if ($null -ne $keyList) {
+                        foreach ($listItem in $keyList) { $keyNames.Add($listItem) }
                         $keyNamesFound = $true
                     }
                 }
                 if (-not $keyNamesFound) {
                     $problems.Add("$prefix `$keyNames isn't in the shape the generator reads, one assignment of a constant list of key names.")
+                }
+
+                # $validKeyNames is optional. When the file has it, it is the whole list of
+                # keys a profile takes, $keyNames among them.
+                $validAssignments = @(& $findAssignment 'validKeyNames')
+                if ($validAssignments.Count -gt 0) {
+                    $validList = $null
+                    if ($validAssignments.Count -eq 1) { $validList = & $keyListOf $validAssignments[0] }
+                    if ($null -eq $validList) {
+                        $problems.Add("$prefix `$validKeyNames isn't in the shape the generator reads, one assignment of a constant list of key names.")
+                    } else {
+                        foreach ($listItem in $validList) { $validKeyNames.Add($listItem) }
+                    }
                 }
 
                 $laterAssignments = @(& $findAssignment 'laterItemKeys')
@@ -1818,6 +1876,15 @@ function Get-OverrideProfileKeyName {
                 if (-not $laterFound) {
                     $problems.Add("$prefix `$laterItemKeys isn't in the shape the generator reads, one assignment of a hashtable literal keyed by constant names.")
                 }
+
+                if ($validKeyNames.Count -gt 0) {
+                    foreach ($keyName in $keyNames) {
+                        if ($validKeyNames -cnotcontains $keyName) { $problems.Add("$prefix `$validKeyNames doesn't hold $keyName, which `$keyNames holds.") }
+                    }
+                    foreach ($laterItemKey in $laterItemKeys) {
+                        if ($validKeyNames -ccontains $laterItemKey) { $problems.Add("$prefix $laterItemKey is in both `$validKeyNames and `$laterItemKeys.") }
+                    }
+                }
             }
         }
     } catch {
@@ -1827,12 +1894,13 @@ function Get-OverrideProfileKeyName {
     $errorText = $null
     if ($problems.Count -gt 0) {
         $errorText = $problems -join [Environment]::NewLine
-        $keyNames.Clear(); $laterItemKeys.Clear()
+        $keyNames.Clear(); $validKeyNames.Clear(); $laterItemKeys.Clear()
     }
     return [pscustomobject]@{
         Path          = $Path
         Error         = $errorText
         KeyNames      = [string[]]$keyNames.ToArray()
+        ValidKeyNames = [string[]]$validKeyNames.ToArray()
         LaterItemKeys = [string[]]$laterItemKeys.ToArray()
     }
 }
@@ -2054,55 +2122,47 @@ function Test-OverrideDocumentProse {
         if ($fenceMatch.Success) { $fenceMarker = $fenceMatch.Groups[1].Value; continue }
         if ($line -match '\A {0,3}#' -or $line -match '\A\s*\|') { continue }
         $proseText = $line -replace '`[^`]*`', '' -replace '\]\([^)]*\)', ']' -replace 'https?://\S+', ''
-        $proseText = $proseText.TrimEnd()
-        if ($proseText.Contains(';')) {
-            $problems.Add("the generated text has a semicolon in prose on line $lineNumber.")
-        }
-        $colonIndex = $proseText.IndexOf(':')
-        if ($colonIndex -ge 0 -and $colonIndex -lt $proseText.Length - 1) {
-            $problems.Add("the generated text has a colon inside a sentence on line $lineNumber. End the sentence instead.")
-        }
+        foreach ($lineProblem in @(Get-OverrideProseLineProblem -Text $proseText -LineNumber $lineNumber)) { $problems.Add($lineProblem) }
     }
     return [string[]]$problems.ToArray()
 }
 
-function ConvertTo-OverrideDocument {
-    <#
-    .SYNOPSIS
-        Returns the whole text of a project's OVERRIDE.md, generated from its catalog.
-    .DESCRIPTION
-        Reads no file, clock or environment, so the same inputs always give the same
-        text: ASCII, LF line endings, no BOM, one blank line between blocks, one final
-        LF, keys and every list sorted ordinally, numbers in the invariant culture, and a
-        pipe inside a table cell written \|. The parts, in order: the title and the
-        generated-file line, where the file goes (with an example from the first two
-        non-secret keys that have a shipped value), precedence, what a run logs, the
-        Settings table, the build profile (when the catalog's Document names one), the
-        retired keys, the CSV replacements (when present), what isn't covered, security,
-        and links to the other projects in Siblings.
+function Get-OverrideProseLineProblem {
+    # The problems in one line of prose, code and link targets already removed: a
+    # semicolon anywhere, or a colon anywhere but as the line's last character. Shared by
+    # both generators' prose checks, so they use the same rule and the same texts.
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param (
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text,
 
-        The catalog is checked as the reader checks it, and then as the generator needs:
-        Project, Document and Document.NotCovered present; every key with Shipped or
-        ShippedText and with ShippedReason; a secret key with ShippedText, never shown
-        from Shipped; a Variable or Constant key with Summary, and a Parameter key
-        without one; an External rule with a Description; a Parameter key with no Rule
-        found in ParameterRule with attributes the generator can put in words; every
-        text one line of printable ASCII citing nothing shaped like a rule or decision
-        identifier; and no table of 500 pairs or more. Any problem returns Error and no
-        text. Never throws.
-    .PARAMETER Catalog
-        The catalog's data, as Import-PowerShellDataFile returns it.
-    .PARAMETER ParameterRule
-        Get-ParameterRule's result for each script whose parameters the catalog's
-        Parameter keys set.
-    .PARAMETER BuildProfileKey
-        Get-OverrideProfileKeyName's result for the script the catalog's
-        Document.BuildProfile.Script names. Pass it only for a catalog with a build
-        profile.
-    .OUTPUTS
-        PSCustomObject with Text ($null when Error is set) and Error ($null, or one
-        problem per line).
-    #>
+        [Parameter(Mandatory)]
+        [int]$LineNumber
+    )
+    $problems  = [System.Collections.Generic.List[string]]::new()
+    $proseText = ([string]$Text).TrimEnd()
+    if ($proseText.Contains(';')) {
+        $problems.Add("the generated text has a semicolon in prose on line $LineNumber.")
+    }
+    $colonIndex = $proseText.IndexOf(':')
+    if ($colonIndex -ge 0 -and $colonIndex -lt $proseText.Length - 1) {
+        $problems.Add("the generated text has a colon inside a sentence on line $LineNumber. End the sentence instead.")
+    }
+    return [string[]]$problems.ToArray()
+}
+
+function Get-OverrideCatalogDocumentCheck {
+    # The checks both generators make before writing a line, so OVERRIDE.md and the
+    # example override file refuse exactly the same catalogs. Returns Problems (each line
+    # starting with -Prefix, or with -CatalogPrefix for the reader's own checks) and, when
+    # there are none, what the writers need: Catalog (ConvertFrom-OverrideCatalogData's
+    # result), KeyNames (sorted ordinally), PermittedTextOf, ProfileKeyNames,
+    # VariableProfileKeyNames, LaterItemNames, Pointers (profile key to its pointer
+    # table), PointedFrom (Settings key to the profile keys that point at it),
+    # DocumentData, NotCoveredRows, CsvRows, SecurityLines, HasBuildProfile and
+    # SiblingNames. Never throws.
     [CmdletBinding()]
     [OutputType([pscustomobject])]
     param (
@@ -2114,19 +2174,38 @@ function ConvertTo-OverrideDocument {
         [object[]]$ParameterRule,
 
         [AllowNull()]
-        [object]$BuildProfileKey
+        [object]$BuildProfileKey,
+
+        [Parameter(Mandatory)]
+        [string]$Prefix,
+
+        [Parameter(Mandatory)]
+        [string]$CatalogPrefix
     )
     $ErrorActionPreference = 'Stop'
-    $problems = [System.Collections.Generic.List[string]]::new()
-    $prefix   = 'Override document:'
-    $lines    = [System.Collections.Generic.List[string]]::new()
+    $problems        = [System.Collections.Generic.List[string]]::new()
+    $prefix          = $Prefix
+    $catalogResult   = $null
+    $keyNames        = [string[]]@()
+    $permittedTextOf = @{}
+    $profileKeyNames = @()
+    $keyListNames    = @()
+    $laterItemNames  = @()
+    $pointers        = @{}
+    $pointedFrom     = @{}
+    $documentData    = $null
+    $notCoveredRows  = @()
+    $csvRows         = @()
+    $securityLines   = @()
+    $hasBuildProfile = $false
+    $siblingNames    = [string[]]@()
+    $keyNamePattern  = '\A[A-Za-z][A-Za-z0-9]*\z'
 
     try {
-        $catalogResult = ConvertFrom-OverrideCatalogData -CatalogData $Catalog -Prefix 'Override catalog:'
+        $catalogResult = ConvertFrom-OverrideCatalogData -CatalogData $Catalog -Prefix $CatalogPrefix
         if ($catalogResult.Error) {
             foreach ($catalogLine in ($catalogResult.Error -split [Environment]::NewLine)) { $problems.Add($catalogLine) }
         } else {
-            #region Check what the generator needs
             $sizeProblem = Get-OverrideTablePairCount -Value $Catalog -Label 'the catalog'
             if ($sizeProblem) { $problems.Add("$prefix $sizeProblem") }
 
@@ -2135,10 +2214,8 @@ function ConvertTo-OverrideDocument {
             elseif ($projectProblem) { $problems.Add("$prefix $projectProblem") }
 
             $documentData = $catalogResult.Document
-            $notCoveredRows = @()
-            $csvRows        = @()
-            $securityLines  = @()
-            $hasBuildProfile = $false
+            $pointerData  = $null
+            $pointersRefused = $false
             if ($null -eq $documentData) {
                 $problems.Add("$prefix the catalog has no Document.")
             } else {
@@ -2184,25 +2261,92 @@ function ConvertTo-OverrideDocument {
                 if ($documentData.ContainsKey('BuildProfile')) {
                     $hasBuildProfile = $true
                     $buildProfileData = $documentData['BuildProfile']
-                    if (-not ($buildProfileData -is [hashtable]) -or $buildProfileData.get_Count() -ne 1 -or -not ($buildProfileData['Script'] -is [string])) {
-                        $problems.Add("$prefix Document.BuildProfile isn't @{ Script = '<path of the script that holds the profile keys>' }.")
+                    $buildProfileFields = @()
+                    if ($buildProfileData -is [hashtable]) { $buildProfileFields = @($buildProfileData.get_Keys()) }
+                    if (-not ($buildProfileData -is [hashtable]) -or -not ($buildProfileData['Script'] -is [string]) -or
+                        @($buildProfileFields | Where-Object { @('Script', 'Pointers') -cnotcontains $_ }).Count -gt 0) {
+                        $problems.Add("$prefix Document.BuildProfile isn't @{ Script = '<path of the script that holds the profile keys>' }, with an optional Pointers table.")
+                    } elseif ($buildProfileData.ContainsKey('Pointers')) {
+                        $pointerData = $buildProfileData['Pointers']
+                        $pointersAreValid = $pointerData -is [hashtable]
+                        if ($pointersAreValid) {
+                            foreach ($pointerName in @($pointerData.get_Keys())) {
+                                $pointerEntry = $pointerData[$pointerName]
+                                $entryIsValid = ($pointerName -is [string]) -and ($pointerName -cmatch $keyNamePattern) -and
+                                                ($pointerEntry -is [hashtable]) -and ($pointerEntry.get_Count() -eq 1) -and
+                                                (($pointerEntry.ContainsKey('Project') -and $pointerEntry['Project'] -is [string]) -or
+                                                 ($pointerEntry.ContainsKey('Key') -and $pointerEntry['Key'] -is [string]))
+                                if (-not $entryIsValid) { $pointersAreValid = $false }
+                            }
+                        }
+                        if (-not $pointersAreValid) {
+                            $problems.Add("$prefix Document.BuildProfile.Pointers isn't a table of profile key names, each @{ Project = '<project>' } or @{ Key = '<key>' }.")
+                            $pointerData = $null
+                            $pointersRefused = $true
+                        }
                     }
                 }
             }
 
-            $profileKeyNames = @()
-            $laterItemNames  = @()
             if ($hasBuildProfile) {
                 if ($null -eq $BuildProfileKey) {
                     $problems.Add("$prefix the catalog's Document names a build profile, and no BuildProfileKey was given.")
                 } elseif ($BuildProfileKey.Error) {
                     foreach ($profileLine in ($BuildProfileKey.Error -split [Environment]::NewLine)) { $problems.Add("$prefix $profileLine") }
                 } else {
-                    $profileKeyNames = @($BuildProfileKey.KeyNames)
-                    $laterItemNames  = @($BuildProfileKey.LaterItemKeys)
-                    foreach ($profileKeyName in $profileKeyNames) {
-                        if (-not ($catalogResult.Settings.get_Keys() -ccontains $profileKeyName) -or $catalogResult.Settings[$profileKeyName].Target -ne 'Variable') {
+                    # $keyNames is applied through global-config.ps1 variables, so each of
+                    # those must be a Variable key. A profile script with $validKeyNames
+                    # lists every key the profile takes, which may be any kind of key, or
+                    # none in this catalog when a pointer says where it is described.
+                    $keyListNames = @($BuildProfileKey.KeyNames)
+                    $profileKeyNames = $keyListNames
+                    if ($BuildProfileKey.PSObject.Properties.Name -contains 'ValidKeyNames' -and @($BuildProfileKey.ValidKeyNames).Count -gt 0) {
+                        $profileKeyNames = @($BuildProfileKey.ValidKeyNames)
+                    }
+                    $laterItemNames = @($BuildProfileKey.LaterItemKeys)
+                    $settingNames = @($catalogResult.Settings.get_Keys())
+                    foreach ($profileKeyName in $keyListNames) {
+                        if (-not ($settingNames -ccontains $profileKeyName) -or $catalogResult.Settings[$profileKeyName].Target -ne 'Variable') {
                             $problems.Add("$prefix the build profile key $profileKeyName isn't a Variable key in the catalog.")
+                        }
+                    }
+                    if ($null -ne $pointerData) {
+                        foreach ($pointerName in (Get-OverrideOrdinalSorted -Text @($pointerData.get_Keys()))) {
+                            $pointerEntry = $pointerData[$pointerName]
+                            $pointerLabel = "Document.BuildProfile.Pointers names $pointerName"
+                            if ($profileKeyNames -cnotcontains $pointerName) {
+                                $problems.Add("$prefix $pointerLabel, which isn't a build profile key.")
+                            } elseif ($settingNames -ccontains $pointerName) {
+                                $problems.Add("$prefix $pointerLabel, which has a row in Settings.")
+                            } elseif ($pointerEntry.ContainsKey('Project')) {
+                                $pointerProject = [string]$pointerEntry['Project']
+                                $siblingKeys = @()
+                                if ($Catalog.ContainsKey('Siblings') -and $Catalog['Siblings'] -is [hashtable] -and $Catalog['Siblings'].ContainsKey($pointerProject)) { $siblingKeys = @($Catalog['Siblings'][$pointerProject]) }
+                                if ($siblingKeys -cnotcontains $pointerName) {
+                                    $problems.Add("$prefix Document.BuildProfile.Pointers points $pointerName at the project '$pointerProject', whose Siblings list doesn't hold $pointerName.")
+                                } else {
+                                    $pointers[$pointerName] = $pointerEntry
+                                }
+                            } else {
+                                $pointerTarget = [string]$pointerEntry['Key']
+                                if ($settingNames -cnotcontains $pointerTarget) {
+                                    $problems.Add("$prefix Document.BuildProfile.Pointers points $pointerName at $pointerTarget, which isn't a key in Settings.")
+                                } elseif ($profileKeyNames -ccontains $pointerTarget) {
+                                    $problems.Add("$prefix Document.BuildProfile.Pointers points $pointerName at $pointerTarget, which a build profile sets by its own name.")
+                                } else {
+                                    $pointers[$pointerName] = $pointerEntry
+                                    if (-not $pointedFrom.ContainsKey($pointerTarget)) { $pointedFrom[$pointerTarget] = [System.Collections.Generic.List[string]]::new() }
+                                    $pointedFrom[$pointerTarget].Add([string]$pointerName)
+                                }
+                            }
+                        }
+                    }
+                    # A Pointers table already refused for its shape isn't reported again
+                    # once per key it would have covered.
+                    foreach ($profileKeyName in $profileKeyNames) {
+                        if ($pointersRefused) { break }
+                        if (-not ($settingNames -ccontains $profileKeyName) -and -not ($null -ne $pointerData -and $pointerData.ContainsKey($profileKeyName))) {
+                            $problems.Add("$prefix the build profile key $profileKeyName has no row in Settings and no pointer in Document.BuildProfile.Pointers.")
                         }
                     }
                 }
@@ -2217,7 +2361,6 @@ function ConvertTo-OverrideDocument {
             }
 
             $keyNames = Get-OverrideOrdinalSorted -Text @($catalogResult.Settings.get_Keys())
-            $permittedTextOf = @{}
             foreach ($keyName in $keyNames) {
                 $entry = $catalogResult.Settings[$keyName]
                 $label = "key $keyName"
@@ -2226,7 +2369,9 @@ function ConvertTo-OverrideDocument {
                 if ($null -eq $entry.ShippedReason) { $problems.Add("$prefix $label has no ShippedReason.") }
                 if ($entry.Target -eq 'Parameter' -and $null -ne $entry.Summary) { $problems.Add("$prefix $label is a Parameter key and has a Summary. Its row points at the parameter instead.") }
                 if ($entry.Target -ne 'Parameter' -and $null -eq $entry.Summary) { $problems.Add("$prefix $label is a $($entry.Target) key and has no Summary.") }
-                foreach ($textField in @('Summary', 'ShippedText', 'ShippedReason', 'OverrideNote', 'ValuesNote')) {
+                if ($entry.Target -eq 'Parameter' -and $null -eq $entry.ExampleNote) { $problems.Add("$prefix $label is a Parameter key and has no ExampleNote. The example file describes it with one.") }
+                if ($entry.Target -ne 'Parameter' -and $null -ne $entry.ExampleNote) { $problems.Add("$prefix $label is a $($entry.Target) key and has an ExampleNote. Its Summary describes it in the example file.") }
+                foreach ($textField in @('Summary', 'ShippedText', 'ShippedReason', 'OverrideNote', 'ValuesNote', 'ExampleNote')) {
                     if ($null -ne $entry.$textField) {
                         $textProblem = Test-OverrideDocumentText -Text $entry.$textField -Label "$label $textField"
                         if ($textProblem) { $problems.Add("$prefix $textProblem") }
@@ -2267,7 +2412,6 @@ function ConvertTo-OverrideDocument {
                 }
             }
 
-            $siblingNames = @()
             if ($Catalog.ContainsKey('Siblings')) {
                 $siblingNames = Get-OverrideOrdinalSorted -Text @($Catalog['Siblings'].get_Keys())
                 foreach ($siblingName in $siblingNames) {
@@ -2278,170 +2422,302 @@ function ConvertTo-OverrideDocument {
                 $textProblem = Test-OverrideDocumentText -Text $catalogResult.Retired[$retiredName].Version -Label "retired key $retiredName Version"
                 if ($textProblem) { $problems.Add("$prefix $textProblem") }
             }
+        }
+    } catch {
+        $problems.Add("$prefix the generator failed unexpectedly ($($_.Exception.GetType().FullName) at OverrideFile.ps1 line $($_.InvocationInfo.ScriptLineNumber)).")
+    }
+
+    # Every list is kept by plain assignment, so a one-item list stays a list.
+    $checkResult = [pscustomobject]@{
+        Problems                = [string[]]$problems.ToArray()
+        Catalog                 = $catalogResult
+        KeyNames                = $null
+        PermittedTextOf         = $permittedTextOf
+        ProfileKeyNames         = $null
+        VariableProfileKeyNames = $null
+        LaterItemNames          = $null
+        Pointers                = $pointers
+        PointedFrom             = $pointedFrom
+        DocumentData            = $documentData
+        NotCoveredRows          = $null
+        CsvRows                 = $null
+        SecurityLines           = $null
+        HasBuildProfile         = $hasBuildProfile
+        SiblingNames            = $null
+    }
+    $checkResult.KeyNames                = [string[]]@($keyNames)
+    $checkResult.ProfileKeyNames         = [string[]]@($profileKeyNames)
+    $checkResult.VariableProfileKeyNames = [string[]]@($keyListNames)
+    $checkResult.LaterItemNames          = [string[]]@($laterItemNames)
+    $checkResult.NotCoveredRows          = [object[]]@($notCoveredRows)
+    $checkResult.CsvRows                 = [object[]]@($csvRows)
+    $checkResult.SecurityLines           = [object[]]@($securityLines)
+    $checkResult.SiblingNames            = [string[]]@($siblingNames)
+    return $checkResult
+}
+
+function ConvertTo-OverrideDocument {
+    <#
+    .SYNOPSIS
+        Returns the whole text of a project's OVERRIDE.md, generated from its catalog.
+    .DESCRIPTION
+        Reads no file, clock or environment, so the same inputs always give the same
+        text: ASCII, LF line endings, no BOM, one blank line between blocks, one final
+        LF, keys and every list sorted ordinally, numbers in the invariant culture, and a
+        pipe inside a table cell written \|. The parts, in order: the title and the
+        generated-file line, where the file goes (with an example from the first two
+        non-secret keys that have a shipped value), precedence, what a run logs, the
+        Settings table, the build profile (when the catalog's Document names one), the
+        retired keys, the CSV replacements (when present), what isn't covered, security,
+        and links to the other projects in Siblings.
+
+        The catalog is checked as the reader checks it, and then as the generator needs:
+        Project, Document and Document.NotCovered present; every key with Shipped or
+        ShippedText and with ShippedReason; a secret key with ShippedText, never shown
+        from Shipped; a Variable or Constant key with Summary and no ExampleNote, and a
+        Parameter key with ExampleNote and no Summary; an External rule with a
+        Description; a Parameter key with no Rule found in ParameterRule with attributes
+        the generator can put in words; every text one line of printable ASCII citing
+        nothing shaped like a rule or decision identifier; no table of 500 pairs or
+        more; and, for a build profile, every profile key either a row in Settings or
+        named in Document.BuildProfile.Pointers. ConvertTo-OverrideExample makes the
+        same checks with the same code. Any problem returns Error and no text. Never
+        throws.
+
+        The build profile's keys are the profile script's $validKeyNames when it has
+        one, else its $keyNames. Each $keyNames key must be a Variable key. A profile
+        key with no row in Settings is listed with its pointer, to another project's
+        OVERRIDE.md (@{ Project = '<project>' }, which must list the key in Siblings) or
+        to the row of the key it sets (@{ Key = '<key>' }).
+    .PARAMETER Catalog
+        The catalog's data, as Import-PowerShellDataFile returns it.
+    .PARAMETER ParameterRule
+        Get-ParameterRule's result for each script whose parameters the catalog's
+        Parameter keys set.
+    .PARAMETER BuildProfileKey
+        Get-OverrideProfileKeyName's result for the script the catalog's
+        Document.BuildProfile.Script names. Pass it only for a catalog with a build
+        profile.
+    .OUTPUTS
+        PSCustomObject with Text ($null when Error is set) and Error ($null, or one
+        problem per line).
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param (
+        [AllowNull()]
+        [object]$Catalog,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$ParameterRule,
+
+        [AllowNull()]
+        [object]$BuildProfileKey
+    )
+    $ErrorActionPreference = 'Stop'
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $prefix   = 'Override document:'
+    $lines    = [System.Collections.Generic.List[string]]::new()
+
+    try {
+        $check = Get-OverrideCatalogDocumentCheck -Catalog $Catalog -ParameterRule $ParameterRule -BuildProfileKey $BuildProfileKey -Prefix $prefix -CatalogPrefix 'Override catalog:'
+        if ($check.Problems.Count -gt 0) {
+            foreach ($checkProblem in $check.Problems) { $problems.Add($checkProblem) }
+        } else {
+            $catalogResult   = $check.Catalog
+            $keyNames        = $check.KeyNames
+            $permittedTextOf = $check.PermittedTextOf
+            $profileKeyNames = $check.ProfileKeyNames
+            $laterItemNames  = $check.LaterItemNames
+            $profilePointers = $check.Pointers
+            $pointedFrom     = $check.PointedFrom
+            $documentData    = $check.DocumentData
+            $notCoveredRows  = $check.NotCoveredRows
+            $csvRows         = $check.CsvRows
+            $securityLines   = $check.SecurityLines
+            $hasBuildProfile = $check.HasBuildProfile
+            $siblingNames    = $check.SiblingNames
+            $cell = { param ([string]$CellText) $CellText.Replace('|', '\|') }
+
+            #region Fixed parts
+            $lines.Add('# Overrides')
+            $lines.Add('')
+            $lines.Add('This file is generated from `include\override-catalog.psd1`. Don''t edit it. A change goes in the catalog, and this file is generated again.')
+            $lines.Add('')
+            $lines.Add('## Where the file goes')
+            $lines.Add('')
+            $lines.Add('Put your settings in `overrides\overrides.psd1` in the project folder. Git ignores that folder, so an upgrade never touches it. The file is a PowerShell data file holding one hashtable of constant values. Each value is a quoted string, a number, `$true`, `$false` or a list of those. Save it as UTF-8 with a BOM when it holds non-ASCII text. A key you leave out takes its shipped value.')
+            $exampleLines = [System.Collections.Generic.List[string]]::new()
+            foreach ($keyName in $keyNames) {
+                if ($exampleLines.Count -ge 2) { break }
+                $entry = $catalogResult.Settings[$keyName]
+                if ($entry.Secret -or -not $entry.HasShipped) { continue }
+                $literalText = ConvertTo-OverrideDocumentValue -Value $entry.Shipped -AsDataFileLiteral
+                if ($null -ne $literalText) { $exampleLines.Add("    $keyName = $literalText") }
+            }
+            if ($exampleLines.Count -gt 0) {
+                $lines.Add('')
+                $lines.Add('For example, with settings at their shipped values:')
+                $lines.Add('')
+                $lines.Add('```powershell')
+                $lines.Add('@{')
+                foreach ($exampleLine in $exampleLines) { $lines.Add($exampleLine) }
+                $lines.Add('}')
+                $lines.Add('```')
+            }
+            $lines.Add('')
+            $lines.Add('To start from a file that lists every key, copy [examples\overrides.psd1](examples/overrides.psd1) to `overrides\overrides.psd1`. Every key in it is commented out at its shipped value, so the copy changes nothing until you remove a `#` and set your own value.')
+            $lines.Add('')
+            $lines.Add('To make the file from an older copy of the project, see [UPGRADE.md](UPGRADE.md).')
+            $lines.Add('')
+            $lines.Add('## Precedence')
+            $lines.Add('')
+            $lines.Add('A value given on the command line wins. Without one, a build profile''s value applies, for the keys whose row says a profile sets them. Without that, the override file''s value applies, and without that, the shipped value. A command-line value that differs from the override file''s is logged as INFO.')
+            $lines.Add('')
+            $lines.Add('## What a run logs')
+            $lines.Add('')
+            $lines.Add('With no override file, a run logs one INFO line saying so, and the shipped settings apply. With one, it logs one INFO line naming the file, its SHA-256 and each setting it applied, with secret values shown as `<set>`. A key left empty gives a WARN, and its shipped value applies. A run stops when the file can''t be read, holds a value that isn''t a constant, holds an unknown key, or holds a value outside a key''s permitted values.')
             #endregion
 
-            if ($problems.Count -eq 0) {
-                $cell = { param ([string]$CellText) $CellText.Replace('|', '\|') }
-
-                #region Fixed parts
-                $lines.Add('# Overrides')
-                $lines.Add('')
-                $lines.Add('This file is generated from `include\override-catalog.psd1`. Don''t edit it. A change goes in the catalog, and this file is generated again.')
-                $lines.Add('')
-                $lines.Add('## Where the file goes')
-                $lines.Add('')
-                $lines.Add('Put your settings in `overrides\overrides.psd1` in the project folder. Git ignores that folder, so an upgrade never touches it. The file is a PowerShell data file holding one hashtable of constant values. Each value is a quoted string, a number, `$true`, `$false` or a list of those. Save it as UTF-8 with a BOM when it holds non-ASCII text. A key you leave out takes its shipped value.')
-                $exampleLines = [System.Collections.Generic.List[string]]::new()
-                foreach ($keyName in $keyNames) {
-                    if ($exampleLines.Count -ge 2) { break }
-                    $entry = $catalogResult.Settings[$keyName]
-                    if ($entry.Secret -or -not $entry.HasShipped) { continue }
-                    $literalText = ConvertTo-OverrideDocumentValue -Value $entry.Shipped -AsDataFileLiteral
-                    if ($null -ne $literalText) { $exampleLines.Add("    $keyName = $literalText") }
+            #region Settings
+            $lines.Add('')
+            $lines.Add('## Settings')
+            $lines.Add('')
+            $lines.Add('| Key | What it changes | How to override | Default | Permitted values | Why this default | Secret |')
+            $lines.Add('|---|---|---|---|---|---|---|')
+            foreach ($keyName in $keyNames) {
+                $entry = $catalogResult.Settings[$keyName]
+                if ($entry.Target -eq 'Parameter') {
+                    $changesText = "The default of ``-$($entry.Name)``, described in the README and the script's help."
+                } else {
+                    $changesText = ConvertTo-OverrideSentence -Text $entry.Summary
                 }
-                if ($exampleLines.Count -gt 0) {
-                    $lines.Add('')
-                    $lines.Add('For example, with settings at their shipped values:')
-                    $lines.Add('')
-                    $lines.Add('```powershell')
-                    $lines.Add('@{')
-                    foreach ($exampleLine in $exampleLines) { $lines.Add($exampleLine) }
-                    $lines.Add('}')
-                    $lines.Add('```')
+                $howText = "``overrides\overrides.psd1``, key ``$keyName``."
+                if ($null -ne $entry.OverrideNote) { $howText += ' ' + (ConvertTo-OverrideSentence -Text $entry.OverrideNote) }
+                if ($profileKeyNames -ccontains $keyName) {
+                    $howText += ' A build profile also sets it, and the profile wins.'
+                } elseif ($pointedFrom.ContainsKey($keyName)) {
+                    $profileNameText = (@(Get-OverrideOrdinalSorted -Text @($pointedFrom[$keyName])) | ForEach-Object { "``$_``" }) -join ' or '
+                    $howText += " A build profile also sets it as $profileNameText, and the profile wins."
+                }
+                if ($entry.Target -eq 'Parameter') { $howText += " ``-$($entry.Name)`` on the command line also sets it, and the command line wins." }
+                if ($null -ne $entry.ShippedText) {
+                    $defaultText = $entry.ShippedText
+                } else {
+                    $defaultText = ConvertTo-OverrideDocumentValue -Value $entry.Shipped
+                }
+                $permittedText = ConvertTo-OverrideSentence -Text $permittedTextOf[$keyName] -Capitalize
+                if ($null -ne $entry.ValuesNote) { $permittedText += ' ' + (ConvertTo-OverrideSentence -Text $entry.ValuesNote) }
+                $reasonText = ConvertTo-OverrideSentence -Text $entry.ShippedReason
+                $secretText = if ($entry.Secret) { 'yes' } else { 'no' }
+                $rowCells = @("``$keyName``", $changesText, $howText, $defaultText, $permittedText, $reasonText, $secretText) | ForEach-Object { & $cell $_ }
+                $lines.Add('| ' + (@($rowCells) -join ' | ') + ' |')
+            }
+            #endregion
+
+            #region Build profile
+            if ($hasBuildProfile) {
+                $lines.Add('')
+                $lines.Add('## Build profile')
+                $lines.Add('')
+                $lines.Add('A build profile, `include\build-profile.psd1`, sets the keys below for one build, and wins over the override file. How to use one is in the README. A key the profile leaves out takes the override file''s value, then the shipped value, with one INFO line. An empty key falls back the same way, with a WARN.')
+                $lines.Add('')
+                if ($profilePointers.get_Count() -eq 0) {
+                    $lines.Add('The keys a build profile takes, each with its permitted values under [Settings](#settings):')
+                } else {
+                    $lines.Add('The keys a build profile takes, each with its permitted values under [Settings](#settings) or where its line points:')
                 }
                 $lines.Add('')
-                $lines.Add('To make the file from an older copy of the project, see [UPGRADE.md](UPGRADE.md).')
-                $lines.Add('')
-                $lines.Add('## Precedence')
-                $lines.Add('')
-                $lines.Add('A value given on the command line wins. Without one, a build profile''s value applies, for the keys whose row says a profile sets them. Without that, the override file''s value applies, and without that, the shipped value. A command-line value that differs from the override file''s is logged as INFO.')
-                $lines.Add('')
-                $lines.Add('## What a run logs')
-                $lines.Add('')
-                $lines.Add('With no override file, a run logs one INFO line saying so, and the shipped settings apply. With one, it logs one INFO line naming the file, its SHA-256 and each setting it applied, with secret values shown as `<set>`. A key left empty gives a WARN, and its shipped value applies. A run stops when the file can''t be read, holds a value that isn''t a constant, holds an unknown key, or holds a value outside a key''s permitted values.')
-                #endregion
+                foreach ($profileKeyName in (Get-OverrideOrdinalSorted -Text $profileKeyNames)) {
+                    if (-not $profilePointers.ContainsKey($profileKeyName)) {
+                        $lines.Add("- [``$profileKeyName``](#settings)")
+                    } elseif ($profilePointers[$profileKeyName].ContainsKey('Project')) {
+                        $pointerProject = [string]$profilePointers[$profileKeyName]['Project']
+                        $lines.Add("- ``$profileKeyName``, described in [$pointerProject's OVERRIDE.md](https://github.com/0x44616e69656c/$pointerProject/blob/main/OVERRIDE.md)")
+                    } else {
+                        $lines.Add("- ``$profileKeyName``, which sets [``$([string]$profilePointers[$profileKeyName]['Key'])``](#settings)")
+                    }
+                }
+                if ($laterItemNames.Count -gt 0) {
+                    $lines.Add('')
+                    $lines.Add('A build profile refuses these keys until their feature exists, so that a profile never looks as if it did something the build didn''t:')
+                    $lines.Add('')
+                    foreach ($laterItemName in (Get-OverrideOrdinalSorted -Text $laterItemNames)) { $lines.Add("- ``$laterItemName``") }
+                }
+            }
+            #endregion
 
-                #region Settings
-                $lines.Add('')
-                $lines.Add('## Settings')
-                $lines.Add('')
-                $lines.Add('| Key | What it changes | How to override | Default | Permitted values | Why this default | Secret |')
-                $lines.Add('|---|---|---|---|---|---|---|')
-                foreach ($keyName in $keyNames) {
-                    $entry = $catalogResult.Settings[$keyName]
-                    if ($entry.Target -eq 'Parameter') {
-                        $changesText = "The default of ``-$($entry.Name)``, described in the README and the script's help."
-                    } else {
-                        $changesText = ConvertTo-OverrideSentence -Text $entry.Summary
-                    }
-                    $howText = "``overrides\overrides.psd1``, key ``$keyName``."
-                    if ($null -ne $entry.OverrideNote) { $howText += ' ' + (ConvertTo-OverrideSentence -Text $entry.OverrideNote) }
-                    if ($profileKeyNames -ccontains $keyName) { $howText += ' A build profile also sets it, and the profile wins.' }
-                    if ($entry.Target -eq 'Parameter') { $howText += " ``-$($entry.Name)`` on the command line also sets it, and the command line wins." }
-                    if ($null -ne $entry.ShippedText) {
-                        $defaultText = $entry.ShippedText
-                    } else {
-                        $defaultText = ConvertTo-OverrideDocumentValue -Value $entry.Shipped
-                    }
-                    $permittedText = ConvertTo-OverrideSentence -Text $permittedTextOf[$keyName] -Capitalize
-                    if ($null -ne $entry.ValuesNote) { $permittedText += ' ' + (ConvertTo-OverrideSentence -Text $entry.ValuesNote) }
-                    $reasonText = ConvertTo-OverrideSentence -Text $entry.ShippedReason
-                    $secretText = if ($entry.Secret) { 'yes' } else { 'no' }
-                    $rowCells = @("``$keyName``", $changesText, $howText, $defaultText, $permittedText, $reasonText, $secretText) | ForEach-Object { & $cell $_ }
+            #region Retired keys, CSV replacements, not covered, security, other projects
+            $lines.Add('')
+            $lines.Add('## Retired keys')
+            $lines.Add('')
+            $retiredNames = Get-OverrideOrdinalSorted -Text @($catalogResult.Retired.get_Keys())
+            if ($retiredNames.Count -eq 0) {
+                $lines.Add('None.')
+            } else {
+                $lines.Add('| Key | Retired in | What happens |')
+                $lines.Add('|---|---|---|')
+                foreach ($retiredName in $retiredNames) {
+                    $retiredEntry = $catalogResult.Retired[$retiredName]
+                    $whatHappens = if ($null -eq $retiredEntry.RenamedTo) { 'Removed. The key is ignored, with a WARN.' } else { "Renamed ``$($retiredEntry.RenamedTo)``. Its value is applied as ``$($retiredEntry.RenamedTo)``, with a WARN." }
+                    $rowCells = @("``$retiredName``", $retiredEntry.Version, $whatHappens) | ForEach-Object { & $cell $_ }
                     $lines.Add('| ' + (@($rowCells) -join ' | ') + ' |')
                 }
-                #endregion
-
-                #region Build profile
-                if ($hasBuildProfile) {
-                    $lines.Add('')
-                    $lines.Add('## Build profile')
-                    $lines.Add('')
-                    $lines.Add('A build profile, `include\build-profile.psd1`, sets the keys below for one build, and wins over the override file. How to use one is in the README. A key the profile leaves out takes the override file''s value, then the shipped value, with one INFO line. An empty key falls back the same way, with a WARN.')
-                    $lines.Add('')
-                    $lines.Add('The keys a build profile takes, each with its permitted values under [Settings](#settings):')
-                    $lines.Add('')
-                    foreach ($profileKeyName in (Get-OverrideOrdinalSorted -Text $profileKeyNames)) { $lines.Add("- [``$profileKeyName``](#settings)") }
-                    if ($laterItemNames.Count -gt 0) {
-                        $lines.Add('')
-                        $lines.Add('A build profile refuses these keys until their feature exists, so that a profile never looks as if it did something the build didn''t:')
-                        $lines.Add('')
-                        foreach ($laterItemName in (Get-OverrideOrdinalSorted -Text $laterItemNames)) { $lines.Add("- ``$laterItemName``") }
-                    }
-                }
-                #endregion
-
-                #region Retired keys, CSV replacements, not covered, security, other projects
-                $lines.Add('')
-                $lines.Add('## Retired keys')
-                $lines.Add('')
-                $retiredNames = Get-OverrideOrdinalSorted -Text @($catalogResult.Retired.get_Keys())
-                if ($retiredNames.Count -eq 0) {
-                    $lines.Add('None.')
-                } else {
-                    $lines.Add('| Key | Retired in | What happens |')
-                    $lines.Add('|---|---|---|')
-                    foreach ($retiredName in $retiredNames) {
-                        $retiredEntry = $catalogResult.Retired[$retiredName]
-                        $whatHappens = if ($null -eq $retiredEntry.RenamedTo) { 'Removed. The key is ignored, with a WARN.' } else { "Renamed ``$($retiredEntry.RenamedTo)``. Its value is applied as ``$($retiredEntry.RenamedTo)``, with a WARN." }
-                        $rowCells = @("``$retiredName``", $retiredEntry.Version, $whatHappens) | ForEach-Object { & $cell $_ }
-                        $lines.Add('| ' + (@($rowCells) -join ' | ') + ' |')
-                    }
-                }
-
-                if ($null -ne $documentData -and $documentData.ContainsKey('CsvReplacements')) {
-                    $lines.Add('')
-                    $lines.Add('## CSV replacements')
-                    $lines.Add('')
-                    $lines.Add('A file at `overrides\config\<name>.csv` replaces `config\<name>.csv` whole, for every script that reads it. A replaced file no longer receives later shipped changes to that file.')
-                    $lines.Add('')
-                    $lines.Add('| File | What it holds | Required headers |')
-                    $lines.Add('|---|---|---|')
-                    $csvByFile = @{}
-                    foreach ($csvRow in $csvRows) { $csvByFile[[string]$csvRow['File']] = $csvRow }
-                    foreach ($csvFile in (Get-OverrideOrdinalSorted -Text @($csvByFile.get_Keys()))) {
-                        $csvRow = $csvByFile[$csvFile]
-                        $headerText = (@($csvRow['Headers']) | ForEach-Object { "``$_``" }) -join ', '
-                        $rowCells = @("``$csvFile``", (ConvertTo-OverrideSentence -Text $csvRow['Holds']), $headerText) | ForEach-Object { & $cell $_ }
-                        $lines.Add('| ' + (@($rowCells) -join ' | ') + ' |')
-                    }
-                }
-
-                $lines.Add('')
-                $lines.Add('## Not covered')
-                $lines.Add('')
-                if ($notCoveredRows.Count -eq 0) {
-                    $lines.Add('None.')
-                } else {
-                    $lines.Add('These can''t be set in the override file.')
-                    $lines.Add('')
-                    $lines.Add('| Setting | Why it isn''t covered |')
-                    $lines.Add('|---|---|')
-                    $notCoveredByName = @{}
-                    foreach ($notCoveredRow in $notCoveredRows) { $notCoveredByName[[string]$notCoveredRow['Name']] = $notCoveredRow }
-                    foreach ($notCoveredName in (Get-OverrideOrdinalSorted -Text @($notCoveredByName.get_Keys()))) {
-                        $rowCells = @("``$notCoveredName``", (ConvertTo-OverrideSentence -Text $notCoveredByName[$notCoveredName]['Reason'])) | ForEach-Object { & $cell $_ }
-                        $lines.Add('| ' + (@($rowCells) -join ' | ') + ' |')
-                    }
-                }
-
-                $lines.Add('')
-                $lines.Add('## Security')
-                $lines.Add('')
-                $securityText = 'Secret values sit in plain text in `overrides\overrides.psd1` on disk, and are masked only in logs.'
-                foreach ($securityLine in $securityLines) { $securityText += ' ' + (ConvertTo-OverrideSentence -Text $securityLine) }
-                $lines.Add($securityText)
-
-                if ($siblingNames.Count -gt 0) {
-                    $lines.Add('')
-                    $lines.Add('## Other projects')
-                    $lines.Add('')
-                    $lines.Add('Each lab project documents its own overrides:')
-                    $lines.Add('')
-                    foreach ($siblingName in $siblingNames) { $lines.Add("- [$siblingName](https://github.com/0x44616e69656c/$siblingName/blob/main/OVERRIDE.md)") }
-                }
-                #endregion
             }
+
+            if ($null -ne $documentData -and $documentData.ContainsKey('CsvReplacements')) {
+                $lines.Add('')
+                $lines.Add('## CSV replacements')
+                $lines.Add('')
+                $lines.Add('A file at `overrides\config\<name>.csv` replaces `config\<name>.csv` whole, for every script that reads it. A replaced file no longer receives later shipped changes to that file.')
+                $lines.Add('')
+                $lines.Add('| File | What it holds | Required headers |')
+                $lines.Add('|---|---|---|')
+                $csvByFile = @{}
+                foreach ($csvRow in $csvRows) { $csvByFile[[string]$csvRow['File']] = $csvRow }
+                foreach ($csvFile in (Get-OverrideOrdinalSorted -Text @($csvByFile.get_Keys()))) {
+                    $csvRow = $csvByFile[$csvFile]
+                    $headerText = (@($csvRow['Headers']) | ForEach-Object { "``$_``" }) -join ', '
+                    $rowCells = @("``$csvFile``", (ConvertTo-OverrideSentence -Text $csvRow['Holds']), $headerText) | ForEach-Object { & $cell $_ }
+                    $lines.Add('| ' + (@($rowCells) -join ' | ') + ' |')
+                }
+            }
+
+            $lines.Add('')
+            $lines.Add('## Not covered')
+            $lines.Add('')
+            if ($notCoveredRows.Count -eq 0) {
+                $lines.Add('None.')
+            } else {
+                $lines.Add('These can''t be set in the override file.')
+                $lines.Add('')
+                $lines.Add('| Setting | Why it isn''t covered |')
+                $lines.Add('|---|---|')
+                $notCoveredByName = @{}
+                foreach ($notCoveredRow in $notCoveredRows) { $notCoveredByName[[string]$notCoveredRow['Name']] = $notCoveredRow }
+                foreach ($notCoveredName in (Get-OverrideOrdinalSorted -Text @($notCoveredByName.get_Keys()))) {
+                    $rowCells = @("``$notCoveredName``", (ConvertTo-OverrideSentence -Text $notCoveredByName[$notCoveredName]['Reason'])) | ForEach-Object { & $cell $_ }
+                    $lines.Add('| ' + (@($rowCells) -join ' | ') + ' |')
+                }
+            }
+
+            $lines.Add('')
+            $lines.Add('## Security')
+            $lines.Add('')
+            $securityText = 'Secret values sit in plain text in `overrides\overrides.psd1` on disk, and are masked only in logs.'
+            foreach ($securityLine in $securityLines) { $securityText += ' ' + (ConvertTo-OverrideSentence -Text $securityLine) }
+            $lines.Add($securityText)
+
+            if ($siblingNames.Count -gt 0) {
+                $lines.Add('')
+                $lines.Add('## Other projects')
+                $lines.Add('')
+                $lines.Add('Each lab project documents its own overrides:')
+                $lines.Add('')
+                foreach ($siblingName in $siblingNames) { $lines.Add("- [$siblingName](https://github.com/0x44616e69656c/$siblingName/blob/main/OVERRIDE.md)") }
+            }
+            #endregion
         }
     } catch {
         $problems.Add("$prefix the generator failed unexpectedly ($($_.Exception.GetType().FullName) at OverrideFile.ps1 line $($_.InvocationInfo.ScriptLineNumber)).")
@@ -2465,6 +2741,178 @@ function ConvertTo-OverrideDocument {
     if ($problems.Count -gt 0) { $errorText = $problems -join [Environment]::NewLine }
     return [pscustomobject]@{
         Text  = $documentText
+        Error = $errorText
+    }
+}
+
+function Test-OverrideExampleText {
+    # Returns the problems with a finished example text, or none: it must be LF and
+    # printable ASCII only, and parse as one statement that is a hashtable with no pairs,
+    # so no key in it is active. Runs nothing.
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param (
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $exampleText = [string]$Text
+    if ($exampleText -cmatch '[^\x0A\x20-\x7E]') {
+        $problems.Add("the generated text holds a character that isn't printable ASCII.")
+        return [string[]]$problems.ToArray()
+    }
+    $parseTokens = $null
+    $parseErrors = $null
+    $exampleAst  = [System.Management.Automation.Language.Parser]::ParseInput($exampleText, [ref]$parseTokens, [ref]$parseErrors)
+    if (@($parseErrors).Count -gt 0) {
+        $problems.Add("the generated text can't be parsed (line $($parseErrors[0].Extent.StartLineNumber)).")
+        return [string[]]$problems.ToArray()
+    }
+    $hashtableAst = $null
+    $statements   = @()
+    if ($null -ne $exampleAst.EndBlock) { $statements = @($exampleAst.EndBlock.Statements) }
+    $otherBlocks = @($exampleAst.ParamBlock, $exampleAst.BeginBlock, $exampleAst.ProcessBlock, $exampleAst.DynamicParamBlock) | Where-Object { $null -ne $_ }
+    if (@($otherBlocks).Count -eq 0 -and $statements.Count -eq 1 -and
+        $statements[0] -is [System.Management.Automation.Language.PipelineAst] -and @($statements[0].PipelineElements).Count -eq 1 -and
+        $statements[0].PipelineElements[0] -is [System.Management.Automation.Language.CommandExpressionAst] -and
+        @($statements[0].PipelineElements[0].Redirections).Count -eq 0) {
+        $hashtableAst = $statements[0].PipelineElements[0].Expression
+    }
+    if (-not ($hashtableAst -is [System.Management.Automation.Language.HashtableAst]) -or @($hashtableAst.KeyValuePairs).Count -ne 0) {
+        $problems.Add("the generated text isn't one hashtable with every key commented out.")
+    }
+    return [string[]]$problems.ToArray()
+}
+
+function ConvertTo-OverrideExample {
+    <#
+    .SYNOPSIS
+        Returns the whole text of a project's example override file,
+        examples\overrides.psd1, generated from its catalog.
+    .DESCRIPTION
+        Reads no file, clock or environment, so the same inputs always give the same
+        text: ASCII, LF line endings, no BOM, one final LF. A fixed header names the
+        project and says how to use the file. Then one hashtable holds one block per
+        catalog key, in ordinal key order with one blank line between blocks, and
+        every line in it is a comment, so the file applies nothing until a user removes
+        a #. Each block is the key's description (a Parameter key's ExampleNote, or a
+        Variable or Constant key's Summary) and its shipped value as a data-file
+        literal. A secret key, or a key whose default can only be put in words, gets a
+        line saying so and a bare "<Key> =", which stops a run if it is uncommented as
+        it stands. Backticks are removed from catalog text.
+
+        The catalog is checked exactly as ConvertTo-OverrideDocument checks it, by the
+        same code, so the two generators refuse the same catalogs. Each prose line is
+        then checked as written (no semicolon, no colon but at a line's end), and the
+        finished text must parse as one hashtable with no pairs. Any problem returns
+        Error and no text. Never throws.
+    .PARAMETER Catalog
+        The catalog's data, as Import-PowerShellDataFile returns it.
+    .PARAMETER ParameterRule
+        As for ConvertTo-OverrideDocument. The example doesn't use it, and takes it so
+        that its checks are the document's.
+    .PARAMETER BuildProfileKey
+        As for ConvertTo-OverrideDocument, and taken for the same reason.
+    .OUTPUTS
+        PSCustomObject with Text ($null when Error is set) and Error ($null, or one
+        problem per line, each starting "Override example:").
+    #>
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
+    param (
+        [AllowNull()]
+        [object]$Catalog,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$ParameterRule,
+
+        [AllowNull()]
+        [object]$BuildProfileKey
+    )
+    $ErrorActionPreference = 'Stop'
+    $problems    = [System.Collections.Generic.List[string]]::new()
+    $prefix      = 'Override example:'
+    $lines       = [System.Collections.Generic.List[string]]::new()
+    $proseLines  = [System.Collections.Generic.List[int]]::new()
+    $exampleText = $null
+
+    try {
+        $check = Get-OverrideCatalogDocumentCheck -Catalog $Catalog -ParameterRule $ParameterRule -BuildProfileKey $BuildProfileKey -Prefix $prefix -CatalogPrefix $prefix
+        if ($check.Problems.Count -gt 0) {
+            foreach ($checkProblem in $check.Problems) { $problems.Add($checkProblem) }
+        } else {
+            $catalogResult = $check.Catalog
+            # A prose line is checked as written; a key line is data and isn't.
+            $addProse = { param ([string]$LineText) $lines.Add($LineText); $proseLines.Add($lines.Count) }
+            $plainText = { param ([string]$CatalogText) ConvertTo-OverrideSentence -Text ($CatalogText -replace '`', '') }
+
+            #region Header
+            & $addProse "# Example override file for $($catalogResult.Project). Each release generates it from"
+            & $addProse '# include\override-catalog.psd1 and replaces it, so don''t edit it here.'
+            $lines.Add('#')
+            & $addProse '# No run reads this file. To use it, copy the lines you need into the @{ } of'
+            & $addProse '# overrides\overrides.psd1 in the project folder, or copy this whole file there.'
+            & $addProse '# Then remove the # in front of each setting you want to change and set your value.'
+            & $addProse '# Leave the others commented out, because a setting you uncomment counts as one you'
+            & $addProse '# chose, even at its shipped value. A setting left commented out keeps its shipped'
+            & $addProse '# value, and follows that value when a later release changes it.'
+            $lines.Add('#')
+            & $addProse '# Every value shown is the shipped one, so a copy left as it is changes nothing.'
+            & $addProse '# A setting shown with no value has no default that can be written here. Give it'
+            & $addProse '# a value before you remove its #, or the run stops.'
+            $lines.Add('#')
+            & $addProse '# OVERRIDE.md lists the values each setting accepts, why it ships as it does, and'
+            & $addProse '# what else can set it. Save the file as UTF-8 with a BOM if you add non-ASCII text.'
+            $lines.Add('')
+            #endregion
+
+            #region One block per key
+            $lines.Add('@{')
+            $isFirstBlock = $true
+            foreach ($keyName in $check.KeyNames) {
+                $entry = $catalogResult.Settings[$keyName]
+                if (-not $isFirstBlock) { $lines.Add('') }
+                $isFirstBlock = $false
+                $descriptionText = if ($entry.Target -eq 'Parameter') { $entry.ExampleNote } else { $entry.Summary }
+                & $addProse ('    # ' + (& $plainText $descriptionText))
+                $literalText = $null
+                if (-not $entry.Secret -and $entry.HasShipped) { $literalText = ConvertTo-OverrideDocumentValue -Value $entry.Shipped -AsDataFileLiteral }
+                if ($null -ne $literalText) {
+                    $lines.Add("    # $keyName = $literalText")
+                } elseif ($entry.Secret) {
+                    & $addProse '    # Secret. Its shipped value is never shown.'
+                    $lines.Add("    # $keyName =")
+                } else {
+                    & $addProse ('    # Shipped default, in words. ' + (& $plainText $entry.ShippedText))
+                    $lines.Add("    # $keyName =")
+                }
+            }
+            $lines.Add('}')
+            #endregion
+
+            foreach ($proseLineNumber in $proseLines) {
+                $proseText = $lines[$proseLineNumber - 1].TrimStart() -replace '\A#\s?', ''
+                foreach ($lineProblem in @(Get-OverrideProseLineProblem -Text $proseText -LineNumber $proseLineNumber)) { $problems.Add("$prefix $lineProblem") }
+            }
+        }
+    } catch {
+        $problems.Add("$prefix the generator failed unexpectedly ($($_.Exception.GetType().FullName) at OverrideFile.ps1 line $($_.InvocationInfo.ScriptLineNumber)).")
+    }
+
+    if ($problems.Count -eq 0) {
+        $exampleText = ($lines -join "`n") + "`n"
+        $textProblems = @(Test-OverrideExampleText -Text $exampleText)
+        if ($textProblems.Count -gt 0) {
+            foreach ($textProblem in $textProblems) { $problems.Add("$prefix $textProblem") }
+            $exampleText = $null
+        }
+    }
+    $errorText = $null
+    if ($problems.Count -gt 0) { $errorText = $problems -join [Environment]::NewLine }
+    return [pscustomobject]@{
+        Text  = $exampleText
         Error = $errorText
     }
 }

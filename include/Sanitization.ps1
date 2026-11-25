@@ -34,11 +34,14 @@
     ConvertTo-SafeLogValue -Value "line1`r`nline2" -PreserveLineBreaks
     Returns "line1`r`nline2" unchanged -- CRLF preserved for a CSV data cell.
 .NOTES
-    Version:          1.0.0
+    Version:          1.0.1
     Author:           Daniel Owen
-    Release Date:     2026-06-11
+    Release Date:     2026-11-19
+    SPDX-License-Identifier: MIT
     Requirements:     Windows PowerShell 5.1.
     Event Log Source: N/A
+.LINK
+    https://github.com/0x44616e69656c/
 #>
 
 #region Functions

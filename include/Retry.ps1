@@ -37,13 +37,16 @@
     $null = Invoke-CommandWithRetry -ScriptBlock { New-ADOrganizationalUnit -Name $localOUName -Path $domainDN }.GetNewClosure() `
         -OperationName "New-ADOU $localOUName" -ThrowOnFailure
 .NOTES
-    Version:          1.0.1
+    Version:          1.0.2
     Author:           Daniel Owen
-    Release Date:     2026-10-26
+    Release Date:     2026-11-19
+    SPDX-License-Identifier: MIT
     Requirements:     Windows PowerShell 5.1. Soft dependency on Logging.ps1 (Write-Log
                       auto-detected via Get-Command if -LogAction is not supplied; see
                       DESCRIPTION).
     Event Log Source: N/A
+.LINK
+    https://github.com/0x44616e69656c/
 #>
 
 #region Functions

@@ -1,90 +1,115 @@
 <#
 .SYNOPSIS
-    Windows Application event log helpers: source registration and a sanitized event writer.
+    Windows Application event log helpers: a check that the script's own event source is
+    registered, and a sanitized event writer.
 .DESCRIPTION
-    Initialize-EventLogSource is get-AdminAudit's robust variant (formerly
-    Initialize-AuditEventSource), kept verbatim as the superset implementation: it checks
-    [System.Diagnostics.EventLog]::SourceExists (treating a thrown check as "not
-    registered"), attempts New-EventLog, and on any failure logs a warning and falls back
-    to the built-in 'Application' source. Returns the effective source name.
+    Test-EventLogSource checks whether an event source is registered under the
+    Application log by reading its registry key, which a standard user can normally do.
+    It never registers a source, never falls back to another source, and writes nothing
+    itself. It returns SourceName, Registered and Warning. When the source is absent, or
+    the check throws (a hardened host can restrict those keys), Registered is $false and
+    Warning names the source and the setup helper, Register-EventLogSource.ps1. The
+    caller then turns its own event logging off for the rest of the run and logs the
+    warning in its own log. A caller that also declined CSV logging has no durable
+    record left, and should stop at startup instead. Only the caller knows that, so the
+    decision is the caller's.
 
-    Write-AppEvent (formerly Write-AuditEvent / Write-RemediationEvent, merged) writes a
-    single event-log entry gated by an -Enabled flag, with the message passed through
-    ConvertTo-SafeLogValue (Sanitization.ps1) before being written. A write failure never
-    aborts the caller -- it degrades to Write-Warning. ValidateSet includes SuccessAudit
-    and FailureAudit (used by get-RogueAdmins' remediation-event entry types) in addition
-    to Information/Warning/Error.
+    Write-AppEvent writes one Application log entry under the caller's source, only when
+    the caller's -EnableEventLogging flag is $true. The message passes through
+    ConvertTo-SafeLogValue (Sanitization.ps1) first. A write failure never aborts the
+    caller. It becomes a Write-Warning, so it is never swallowed silently. The entry
+    type list includes SuccessAudit and FailureAudit as well as Information, Warning
+    and Error.
+
+    Registering a source is the job of Register-EventLogSource.ps1, run once, elevated,
+    per machine. Nothing in this file registers one.
 .EXAMPLE
-    $sourceName = Initialize-EventLogSource -SourceName 'Get-AdminAudit'
-    Write-AppEvent -Enabled $enableEventLogging -SourceName $sourceName `
+    $enableEventLogging = $true
+    $eventLogSourceName = 'Get-AdminAudit'
+    $sourceCheck = Test-EventLogSource -SourceName $eventLogSourceName
+    if (-not $sourceCheck.Registered) {
+        $enableEventLogging = $false
+        Write-Log $sourceCheck.Warning -Level WARN
+    }
+    Write-AppEvent -EnableEventLogging $enableEventLogging -SourceName $eventLogSourceName `
         -EntryType Information -EventId 1000 -Message 'Get-AdminAudit started.'
 .NOTES
-    Version:          1.0.1
+    Version:          2.0.1
     Author:           Daniel Owen
-    Release Date:     2026-10-26
+    Release Date:     2026-11-19
+    SPDX-License-Identifier: MIT
     Requirements:     Windows PowerShell 5.1. Dot-source Sanitization.ps1 first (hard
                       dependency: Write-AppEvent calls ConvertTo-SafeLogValue).
-                      WARNING: Write-EventLog is deprecated in PowerShell 7+. This library
-                      targets Windows PowerShell 5.1, where Write-EventLog is the correct
-                      API. For a PowerShell 7+ port, replace Write-EventLog with
-                      New-WinEvent against a registered ETW manifest.
-    Event Log Source: Source registration is performed by the consuming script via
-                      Initialize-EventLogSource and requires local administrator rights on
-                      the target machine. Registration failure falls back to the built-in
-                      'Application' source automatically.
+                      Write-AppEvent uses Write-EventLog, which exists in Windows
+                      PowerShell 5.1 only. The *-EventLog cmdlets were removed in
+                      PowerShell 7, where the equivalent is
+                      [System.Diagnostics.EventLog]::WriteEntry(). Never New-WinEvent,
+                      which needs a compiled, registered instrumentation manifest.
+    Target Set Source: N/A
+    Event Log Source: Named by the consuming script, and checked with
+                      Test-EventLogSource.
+    Setup:            Register-EventLogSource.ps1 -SourceName <name>, run once,
+                      elevated, on each machine that runs the consuming script.
+.LINK
+    https://github.com/0x44616e69656c/
 #>
 
 #region Functions
 
-function Initialize-EventLogSource {
-    # Ensures the Windows event-log source is registered so the consuming script can write
-    # to the Application log for SIEM ingestion. Returns the effective source name:
-    # the requested source if it exists or can be registered, otherwise the built-in
-    # 'Application' source. New-EventLog source registration requires LOCAL ADMINISTRATOR
-    # rights; a non-admin run falls back to 'Application' instead of failing.
+function Test-EventLogSource {
+    # Checks whether an event source is registered under the Application log, by reading
+    # its registry key. Registers nothing and writes nothing. Returns SourceName,
+    # Registered ($true only when the key exists) and Warning ($null, or the text for the
+    # caller to log when Registered is $false). A check that throws counts as "can't be
+    # checked", never as "absent".
+    [CmdletBinding()]
+    [OutputType([pscustomobject])]
     param (
         [Parameter(Mandatory)]
-        [string]$SourceName,
-        [string]$LogName = 'Application'
+        [ValidatePattern('\A[A-Za-z0-9][A-Za-z0-9 ._-]*\z')]
+        [string]$SourceName
     )
+    $sourcePath = "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$SourceName"
+    $result = [pscustomobject]@{ SourceName = $SourceName; Registered = $false; Warning = $null }
+    $setupText = "Run Register-EventLogSource.ps1 -SourceName '$SourceName' once, elevated, to register it."
     try {
-        if ([System.Diagnostics.EventLog]::SourceExists($SourceName)) { return $SourceName }
+        $result.Registered = [bool](Test-Path -LiteralPath $sourcePath)
+        if (-not $result.Registered) {
+            $result.Warning = "Event log source '$SourceName' isn't registered under the Application log, so this run writes no events. $setupText"
+        }
+    } catch {
+        $result.Registered = $false
+        $result.Warning = "Event log source '$SourceName' couldn't be checked ($($_.Exception.GetType().FullName) reading its registry key), so this run writes no events. If it isn't registered yet, run Register-EventLogSource.ps1 -SourceName '$SourceName' once, elevated."
     }
-    catch {
-        # SourceExists can throw on restricted logs; treat as "not registered" and try to create.
-        Write-Verbose "SourceExists check failed for '$SourceName'; will attempt registration: $($_.Exception.Message)"
-    }
-    try {
-        New-EventLog -LogName $LogName -Source $SourceName -ErrorAction Stop
-        return $SourceName
-    }
-    catch {
-        Write-Warning "Event source '$SourceName' could not be registered (this requires local administrator rights). Falling back to the built-in 'Application' source. $($_.Exception.Message)"
-        return 'Application'
-    }
+    return $result
 }
 
 function Write-AppEvent {
-    # Writes a single Windows event-log entry, gated by the caller's -Enabled flag.
-    # WARNING: Write-EventLog is deprecated in PowerShell 7+. This targets Windows
-    # PowerShell 5.1; for a PS7 target, replace with New-WinEvent against a registered manifest.
-    # A write failure never aborts the caller - it degrades to a warning, so it is never swallowed silently.
+    # Writes one Application log entry under the caller's source, only when the caller's
+    # -EnableEventLogging flag is $true. A write failure never aborts the caller. It
+    # becomes a warning, so it is never swallowed silently. Windows PowerShell 5.1 only,
+    # because Write-EventLog doesn't exist in PowerShell 7.
+    [CmdletBinding()]
     param (
-        [bool]$Enabled = $true,
+        [Parameter(Mandatory)]
+        [bool]$EnableEventLogging,
+
         [Parameter(Mandatory)]
         [string]$SourceName,
-        [string]$LogName = 'Application',
+
         [Parameter(Mandatory)]
         [ValidateSet('Information', 'Warning', 'Error', 'SuccessAudit', 'FailureAudit')]
         [string]$EntryType,
+
         [Parameter(Mandatory)]
         [int]$EventId,
+
         [Parameter(Mandatory)]
         [string]$Message
     )
-    if (-not $Enabled) { return }
+    if (-not $EnableEventLogging) { return }
     try {
-        Write-EventLog -LogName $LogName -Source $SourceName -EntryType $EntryType `
+        Write-EventLog -LogName 'Application' -Source $SourceName -EntryType $EntryType `
             -EventId $EventId -Message (ConvertTo-SafeLogValue -Value $Message) -ErrorAction Stop
     }
     catch {
